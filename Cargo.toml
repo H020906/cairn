@@ -1,0 +1,42 @@
+[workspace]
+resolver = "2"
+members = [
+    "runtime",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.82"
+license = "Apache-2.0"
+repository = "https://github.com/cairn-compute/cairn"
+authors = ["The Cairn Authors"]
+
+[workspace.dependencies]
+blake3 = "1.5"
+
+[workspace.lints.rust]
+# Determinism is a correctness precondition here, not a quality goal. Anything that
+# could silently vary between machines is denied outright rather than linted.
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Panics inside the execution kernel become network-wide result corruption.
+unwrap_used = "warn"
+expect_used = "warn"
+indexing_slicing = "warn"
+# Floating-point comparison must always be deliberate in this codebase.
+float_cmp = "deny"
+
+[profile.release]
+# The trace commitment must be identical across builds; disable anything that could
+# introduce build-dependent behaviour into the hot path.
+lto = true
+codegen-units = 1
+panic = "abort"
+overflow-checks = true
+
+[profile.bench]
+lto = true
+codegen-units = 1

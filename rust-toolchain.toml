@@ -1,0 +1,8 @@
+# Pinned so that every contributor and every CI run compiles with the same rustc.
+# The trace commitment is a consensus artefact: two workers on different compilers
+# must still agree bit-for-bit, so the toolchain is part of the protocol surface.
+[toolchain]
+channel = "stable"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]
+profile = "default"

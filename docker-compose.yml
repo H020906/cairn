@@ -1,0 +1,69 @@
+# Cairn — local development stack.
+#
+#   docker compose up -d            # infrastructure only (default)
+#   docker compose --profile app up # infrastructure + coordinator + dashboard
+#
+# The `app` profile activates once those services have Dockerfiles; until then the
+# coordinator and dashboard are run from the IDE against this infrastructure.
+
+name: cairn
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    container_name: cairn-postgres
+    environment:
+      POSTGRES_DB: cairn
+      POSTGRES_USER: cairn
+      # Local development only. Production credentials come from the environment;
+      # see .env.example. Never reuse this value outside a dev machine.
+      POSTGRES_PASSWORD: cairn_local_dev
+      # Deterministic collation — ordering must not vary by host locale.
+      POSTGRES_INITDB_ARGS: "--locale=C --encoding=UTF8"
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cairn -d cairn"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 10s
+    command:
+      # Trace slow statements during development — the assignment path is latency
+      # sensitive and regressions should be visible immediately.
+      - "postgres"
+      - "-c"
+      - "log_min_duration_statement=200"
+      - "-c"
+      - "shared_preload_libraries=pg_stat_statements"
+      - "-c"
+      - "pg_stat_statements.track=all"
+
+  redis:
+    image: redis:7-alpine
+    container_name: cairn-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    command:
+      # Leases and heartbeats are reconstructible; durability here is a convenience,
+      # not a correctness requirement. PostgreSQL is the system of record.
+      - "redis-server"
+      - "--appendonly"
+      - "yes"
+      - "--appendfsync"
+      - "everysec"
+      - "--maxmemory-policy"
+      - "noeviction"
+
+volumes:
+  postgres-data:
+  redis-data:

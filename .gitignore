@@ -1,0 +1,78 @@
+# --- Build output -----------------------------------------------------------
+# NOTE: this repository lives inside a OneDrive-synced folder on the primary dev
+# machine. Build directories churn heavily and must never be synced or committed.
+target/
+build/
+dist/
+out/
+*.class
+*.jar
+!**/gradle/wrapper/gradle-wrapper.jar
+!**/.mvn/wrapper/maven-wrapper.jar
+
+# --- Rust -------------------------------------------------------------------
+**/target/
+Cargo.lock.bak
+*.pdb
+pkg/
+wasm-pack.log
+
+# --- Node -------------------------------------------------------------------
+node_modules/
+.pnpm-store/
+.vite/
+*.tsbuildinfo
+.eslintcache
+
+# --- Java / Maven -----------------------------------------------------------
+.mvn/timing.properties
+.mvn/wrapper/maven-wrapper.properties.bak
+release.properties
+dependency-reduced-pom.xml
+buildNumber.properties
+
+# --- Local state & data -----------------------------------------------------
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# --- Secrets ----------------------------------------------------------------
+# Never commit these. .env.example is the template that IS committed.
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.jks
+secrets/
+
+# --- Logs & profiling -------------------------------------------------------
+*.log
+logs/
+hs_err_pid*
+replay_pid*
+*.hprof
+flamegraph.svg
+perf.data*
+
+# --- Editors & OS -----------------------------------------------------------
+.idea/
+*.iml
+.vscode/*
+!.vscode/extensions.json
+!.vscode/launch.json
+.DS_Store
+Thumbs.db
+desktop.ini
+$RECYCLE.BIN/
+
+# --- Agent / tooling scratch ------------------------------------------------
+.claude/
+.cursor/
+scratch/
+tmp/

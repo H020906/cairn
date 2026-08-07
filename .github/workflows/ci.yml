@@ -1,0 +1,73 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Volunteers' results depend on this compiling identically everywhere. Fail on any
+  # warning rather than accumulating them.
+  RUSTFLAGS: -D warnings
+
+jobs:
+  runtime:
+    name: Execution kernel (Rust)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        # rust-toolchain.toml pins the channel, components and targets; this action
+        # honours it, so the toolchain is not specified twice.
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+      - name: Build for the browser
+        # The kernel has to compile to wasm32 or there is no zero-install worker.
+        run: cargo build --workspace --target wasm32-unknown-unknown --release
+
+  determinism:
+    name: Determinism gate
+    runs-on: ubuntu-latest
+    needs: runtime
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Differential fuzz — fast path vs instrumented interpreter
+        # THIS GATE IS NOT ADVISORY. If the two engines disagree on any instruction,
+        # dispute arbitration convicts honest volunteers. See docs/adr/0003.
+        #
+        # Enabled once `engine::fast` and `engine::slow` land; until then this step is a
+        # visible placeholder rather than a silent absence, so nobody mistakes a green
+        # build for a covered invariant.
+        run: |
+          if cargo test --workspace --list 2>/dev/null | grep -q 'differential'; then
+            cargo test --workspace differential -- --nocapture
+          else
+            echo "::warning title=Determinism gate inactive::Differential fuzzing is not yet implemented. This gate will fail the build once engine::fast and engine::slow exist. Do not rely on CI to catch engine divergence until then."
+          fi
+
+  # Added as the modules land. Listed here so the intended shape of CI is visible from
+  # the start rather than discovered later.
+  #
+  # coordinator:  JDK 21, ./mvnw verify, Testcontainers against PostgreSQL + Redis
+  # dashboard:    Node 20, npm ci, typecheck, test, build

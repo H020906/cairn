@@ -1,0 +1,32 @@
+# Normalise line endings so a Windows contributor's first commit is not a whole-file diff.
+* text=auto eol=lf
+
+# Scripts that the OS itself executes must keep their native endings.
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+*.ps1       text eol=crlf
+mvnw        text eol=lf
+gradlew     text eol=lf
+*.sh        text eol=lf
+
+# Binary — never touch, never diff as text.
+*.wasm      binary
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.webp      binary
+*.ico       binary
+*.woff      binary
+*.woff2     binary
+*.jar       binary
+*.pdb       binary
+
+# Generated lockfiles: keep them in the repository but out of code review noise.
+Cargo.lock      linguist-generated=true -diff
+package-lock.json linguist-generated=true -diff
+
+# Fixture data for the determinism tests is byte-sensitive. Any normalisation here would
+# silently change what the tests assert.
+tests/fixtures/**   -text
+workloads/**/*.wasm binary
