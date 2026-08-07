@@ -25,18 +25,22 @@
 //! - [`merkle`] — incremental Merkle commitment over linear memory pages. The structure
 //!   that lets a snapshot cost `O(writes)` rather than `O(memory)`, and that lets the
 //!   coordinator verify one page against a root without holding the whole image.
+//! - [`fuel`] — the instruction counter that gives a trace its coordinate system.
+//!   "Instruction *i*" must mean the same thing on every machine.
+//!
+//! - [`validate`] — decides which modules Cairn is willing to run at all. Its allowlist is
+//!   deliberately the same set the interpreter implements, so no module can be accepted that
+//!   we would later be unable to arbitrate.
 //!
 //! Still to land, in dependency order:
 //!
-//! - `fuel` — the instruction counter that gives a trace its coordinate system. "Instruction
-//!   *i*" must mean the same thing on every machine.
 //! - `canon` — the instrumentation pass that rewrites a submitted module into Cairn-canonical
 //!   form: NaN canonicalization, fuel metering, snapshot hooks, deterministic resource
 //!   ceilings.
-//! - `validate` — rejects modules using threads, atomics, shared memory, relaxed SIMD, or
-//!   any import outside the three-call host interface.
 //! - `engine` — the two execution paths. `fast` hands the instrumented module to the host
 //!   engine and snapshots at `2^k` boundaries; `slow` is a fully instrumented interpreter
 //!   able to execute a single instruction in isolation from a committed state.
 
+pub mod fuel;
 pub mod merkle;
+pub mod validate;

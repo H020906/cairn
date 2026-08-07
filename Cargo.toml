@@ -7,7 +7,10 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.82"
+# Chosen by wasmparser, which is core infrastructure here and worth staying current with.
+# Raise only for a comparable reason: a low MSRV is a courtesy to contributors on older
+# distributions.
+rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/cairn-compute/cairn"
 authors = ["The Cairn Authors"]
