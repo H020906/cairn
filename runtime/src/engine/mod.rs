@@ -11,5 +11,9 @@
 //!
 //! - [`image`] — decodes an instrumented module into a form an interpreter can execute,
 //!   resolving control-flow targets ahead of time.
+//! - [`numeric`] — the numeric instructions, as pure stack transformations. Separated from
+//!   the machine because this is where transcription risk concentrates, and it can be tested
+//!   exhaustively without one.
 
 pub mod image;
+pub mod numeric;
