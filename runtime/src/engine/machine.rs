@@ -72,17 +72,39 @@ pub enum Progress {
     Finished,
 }
 
+/// A committed point in an execution.
+///
+/// # Why the step index and not the fuel value
+///
+/// Fuel is charged per basic block, so it advances in jumps: dozens of instructions between
+/// two `charge` calls all share one fuel value. That makes "the state at fuel F" ambiguous,
+/// and a bisection coordinate has to be unambiguous.
+///
+/// The step index has no such problem — [`Machine::step`] executes exactly one instruction, so
+/// step *n* names exactly one state. Fuel is the budget mechanism; the step index is the
+/// position mechanism. Both are recorded, and bisection searches the step index.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Snapshot {
+    /// Instructions executed before this state.
+    pub step: u64,
+    /// Fuel consumed at this point. Carried for cost accounting, not for addressing.
+    pub fuel: Fuel,
+    /// The state root.
+    pub root: Hash,
+}
+
 /// The artefact a worker submits: the answer, and a commitment to how it got there.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trace {
     /// State root before the first instruction.
     pub initial: Hash,
-    /// State roots at each snapshot boundary, with the fuel value each is labelled with.
-    /// Strictly increasing in fuel, which is what bisection binary-searches over.
-    pub snapshots: Vec<(Fuel, Hash)>,
+    /// Committed states at each snapshot boundary, strictly increasing in step index.
+    pub snapshots: Vec<Snapshot>,
     /// State root after the last instruction.
     pub final_root: Hash,
-    /// Instructions retired.
+    /// Instructions executed.
+    pub steps: u64,
+    /// Fuel consumed.
     pub fuel: Fuel,
     /// What the workload wrote through `cairn.output`.
     pub output: Vec<u8>,
@@ -238,6 +260,8 @@ pub struct Machine<'a> {
     output: Vec<u8>,
     dropped_data: Vec<bool>,
     dropped_elements: Vec<bool>,
+    /// Instructions executed. The coordinate dispute bisection searches — see [`Snapshot`].
+    steps: u64,
     finished: bool,
 }
 
@@ -290,6 +314,7 @@ impl<'a> Machine<'a> {
             output: Vec::new(),
             dropped_data,
             dropped_elements,
+            steps: 0,
             finished: false,
         };
         machine.enter(image.entry)?;
@@ -348,10 +373,19 @@ impl<'a> Machine<'a> {
         )
     }
 
-    /// Instructions retired.
+    /// Fuel consumed.
     #[must_use]
     pub fn fuel(&self) -> Fuel {
         self.meter.consumed()
+    }
+
+    /// Instructions executed.
+    ///
+    /// This is the coordinate dispute bisection addresses states by, because it names exactly
+    /// one state per value where a fuel value does not. See [`Snapshot`].
+    #[must_use]
+    pub fn steps(&self) -> u64 {
+        self.steps
     }
 
     /// What the workload has written through `cairn.output`.
@@ -378,7 +412,14 @@ impl<'a> Machine<'a> {
         loop {
             match self.step()? {
                 Progress::Continued => {}
-                Progress::Snapshot { at } => snapshots.push((at, self.commit().root())),
+                Progress::Snapshot { at } => {
+                    let step = self.steps;
+                    snapshots.push(Snapshot {
+                        step,
+                        fuel: at,
+                        root: self.commit().root(),
+                    });
+                }
                 Progress::Finished => break,
             }
         }
@@ -386,6 +427,7 @@ impl<'a> Machine<'a> {
         Ok(Trace {
             initial,
             final_root: self.commit().root(),
+            steps: self.steps,
             fuel: self.meter.consumed(),
             output: std::mem::take(&mut self.output),
             snapshots,
@@ -425,6 +467,8 @@ impl<'a> Machine<'a> {
         if let Some(frame) = self.frames.last_mut() {
             frame.pc = pc.saturating_add(1);
         }
+        // One instruction is about to execute, whatever it turns out to be.
+        self.steps = self.steps.saturating_add(1);
 
         if numeric::apply(op, &mut self.stack)? {
             return Ok(Progress::Continued);
@@ -1435,7 +1479,7 @@ mod tests {
     // --- the trace ---------------------------------------------------------------------
 
     #[test]
-    fn snapshots_are_labelled_with_strictly_increasing_fuel() {
+    fn snapshots_are_ordered_by_step_index() {
         // Bisection binary-searches this sequence, which is only meaningful if it is ordered.
         let module = canonical(
             r#"(module
@@ -1466,10 +1510,15 @@ mod tests {
             trace.snapshots.len()
         );
         assert!(
-            trace.snapshots.is_sorted_by(|a, b| a.0 < b.0),
-            "fuel labels must strictly increase"
+            trace.snapshots.is_sorted_by(|a, b| a.step < b.step),
+            "step indices must strictly increase"
         );
+        // Fuel is monotonic too, but only weakly: it is charged per basic block, so two
+        // snapshots can share a value. That is exactly why the step index, and not fuel, is
+        // what bisection addresses states by.
+        assert!(trace.snapshots.is_sorted_by(|a, b| a.fuel <= b.fuel));
         assert_ne!(trace.initial, trace.final_root);
+        assert_eq!(trace.steps, machine.steps());
     }
 
     #[test]
@@ -1526,7 +1575,14 @@ mod tests {
         loop {
             match stepped.step().unwrap() {
                 Progress::Continued => {}
-                Progress::Snapshot { at } => snapshots.push((at, stepped.commit().root())),
+                Progress::Snapshot { at } => {
+                    let step = stepped.steps();
+                    snapshots.push(Snapshot {
+                        step,
+                        fuel: at,
+                        root: stepped.commit().root(),
+                    });
+                }
                 Progress::Finished => break,
             }
         }
@@ -1534,6 +1590,7 @@ mod tests {
         assert_eq!(initial, expected.initial);
         assert_eq!(snapshots, expected.snapshots);
         assert_eq!(stepped.commit().root(), expected.final_root);
+        assert_eq!(stepped.steps(), expected.steps);
         assert_eq!(stepped.fuel(), expected.fuel);
         assert_eq!(stepped.output(), expected.output);
     }

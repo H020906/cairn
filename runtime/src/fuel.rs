@@ -13,17 +13,24 @@
 //! rewrite time and identical for every worker, so the running total is exact even though it
 //! advances in jumps.
 //!
-//! # The consequence for bisection, and how it is resolved
+//! # Fuel is a budget, not an address
 //!
-//! Because charging is batched, snapshot boundaries land at the first block boundary at or
-//! after each `2^k` threshold rather than precisely on it. Committed snapshots therefore
-//! bracket a divergence to within one block-crossing window, not to a single instruction.
+//! Because charging is batched, fuel advances in jumps: every instruction between two
+//! `charge` calls shares one fuel value. **"The state at fuel F" is therefore ambiguous**, and
+//! fuel cannot serve as the coordinate dispute bisection binary-searches over.
 //!
-//! Bisection still reaches a single instruction, because a worker in a dispute can be asked
-//! for the state root at *any* fuel value, not only at the ones it pre-committed to: it
-//! replays forward from the nearest committed snapshot and answers. The replay work falls on
-//! the disputing workers, who have a stake in the outcome, while the coordinator continues to
-//! do `O(log n)` verification and one final single-instruction re-execution.
+//! An earlier version of this document claimed it could, on the reasoning that a worker can be
+//! asked for the root at any fuel value. The replay part of that is right; the addressing part
+//! is not, because many distinct states share a fuel value.
+//!
+//! The coordinate is the **step index** instead — see [`crate::engine::machine::Snapshot`].
+//! [`crate::engine::machine::Machine::step`] executes exactly one instruction, so step *n*
+//! names exactly one state. Fuel remains what it was built to be: the budget that bounds an
+//! execution and the unit the network accounts costs in.
+//!
+//! Snapshot boundaries are still decided by fuel, since that is what the instrumentation pass
+//! meters. They simply land at whichever step index the crossing happened to occur at, and are
+//! labelled with both.
 //!
 //! # Determinism rules
 //!

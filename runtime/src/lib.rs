@@ -45,6 +45,7 @@
 //!   holds [`engine::image`], the decoder both paths share.
 
 pub mod canon;
+pub mod dispute;
 pub mod engine;
 pub mod fuel;
 pub mod merkle;
