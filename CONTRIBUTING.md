@@ -5,28 +5,32 @@ unclear, that is a bug in this document — please say so.
 
 ## Before anything else
 
-Read **[ARCHITECTURE.md](ARCHITECTURE.md)**. Cairn looks like an ordinary distributed job
-system and is not one; the verification protocol is the whole point, and a change that
-seems harmless can quietly break it. Then read
+Read **[docs/MAINTAINER.md](docs/MAINTAINER.md)** — it is the honest account of what exists
+and what does not, and it will save you from planning work against components that have not
+been written. Then **[ARCHITECTURE.md](ARCHITECTURE.md)**: Cairn looks like an ordinary
+distributed job system and is not one; the verification protocol is the whole point, and a
+change that seems harmless can quietly break it. Then
 **[ADR-0001](docs/adr/0001-verification-by-dispute-not-replication.md)**.
 
 ## Local setup
 
-You need:
+**Today you need Rust and nothing else.** The repository currently contains one crate.
 
-| Tool | Version | Notes |
+| Tool | Version | Needed |
 |---|---|---|
-| JDK | 21+ | Coordinator. Maven comes from the wrapper — do not install it |
-| Rust | stable | `rustup target add wasm32-unknown-unknown` |
-| Node | 20+ | Dashboard |
-| Docker | any recent | PostgreSQL + Redis |
+| Rust | stable (MSRV 1.86) | **Now** |
+| JDK | 21+ | When the coordinator lands. Maven comes from the wrapper — do not install it |
+| Node | 20+ | When the dashboard lands |
+| Docker | any recent | When there is a PostgreSQL/Redis-backed service to run |
 
 ```bash
-git clone <repo> && cd cairn
-docker compose up -d          # PostgreSQL + Redis
-cd server && ./mvnw spring-boot:run
-cd web && npm install && npm run dev
+git clone https://github.com/H020906/cairn && cd cairn
+cargo test --workspace
 ```
+
+`docker-compose.yml` exists and will start PostgreSQL and Redis. Nothing connects to them
+yet; it is there so the eventual coordinator has a one-command environment, not because you
+need it today.
 
 On Windows without the MSVC C++ workload, use the GNU host toolchain — it links without
 Visual Studio:
@@ -75,11 +79,12 @@ assignment and lease logic is concurrent and cannot be trusted to unit tests alo
 
 ## Good first issues
 
-Look for the `good-first-issue` label. If there are none open, these are always welcome:
+**[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** has nine, specified and sized,
+each with where to start and how you know you are done. Beyond that list, these are always
+welcome:
 
-- Additional scientific workloads under `workloads/`
 - Determinism test cases — especially nasty floating-point corner cases
-- Accessibility and i18n on the dashboard
+- Additional scientific workloads under `workloads/`
 - Documentation that explains something you had to work out yourself
 
 ## Scope of ambition

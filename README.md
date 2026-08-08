@@ -52,8 +52,8 @@ halves of that are measured, and the numbers are below.
 
 When a volunteer finishes a job, they return the answer *and a cryptographic commitment to
 how they got there* — a Merkle root over snapshots of machine state taken every few
-thousand instructions. Taking those snapshots costs 1%–25% depending on the workload, rather
-than a second full run.
+thousand instructions. Instrumenting a program to produce that costs 13%–201% depending on
+the workload, which is far more than the design assumed and is discussed honestly below.
 
 Most jobs are then accepted after a **single** execution. Confidence comes from decoy jobs
 whose answers we already know, silently mixed into the stream, plus a reputation score
@@ -105,39 +105,59 @@ others cannot. See [ADR-0002](docs/adr/0002-language-boundaries.md).
 
 ## Quick start
 
-> Not yet functional — the repository is days old. This is the shape it is being built to.
+There is no running system to start yet — see the roadmap. What you *can* do is verify every
+claim on this page for yourself, with Rust and nothing else installed:
 
 ```bash
-docker compose up
+cargo test --workspace
 ```
 
-Coordinator on `:8080`, dashboard on `:5173`, PostgreSQL and Redis provisioned and
-migrated. Open the dashboard and click **Contribute** to become a node.
+197 tests. Among them: an interpreter checked instruction-by-instruction against an
+independent WASM engine, a bisection game that converges on a corrupted instruction, and an
+adjudication that names the liar without replaying the job. Then `cargo bench` regenerates
+the numbers in the table above, including the one that came out badly.
 
 ## Roadmap
 
 Cairn is being built in a deliberately short, fixed window, with a bias toward *narrow and
-finished* over *broad and abandoned*. Priority order — anything below the line that does
-not land is documented rather than half-built.
+finished* over *broad and abandoned*.
 
-- [ ] Repository, CI, one-command local stack
-- [ ] Architecture decision records
-- [ ] Coordinator domain model + PostgreSQL schema
-- [ ] Assignment, leases, heartbeats
-- [ ] **Deterministic Rust execution kernel + trace commitment**
-- [ ] Browser volunteer node
-- [ ] Verification: canaries, reputation, selective replication
-- [ ] **Interactive bisection arbitration**
-- [ ] Native worker
-- [ ] Dashboard + live globe
-- [ ] A real scientific workload (molecular docking)
-- [ ] Benchmarks and maintainer handover
+**Today, what exists is the Rust verification kernel and nothing else.** The stack table
+above describes the design; only its `runtime/` row has been written. There is no Java
+source, no database schema, no browser worker and no dashboard in this repository. That is
+stated plainly rather than left implied by unticked boxes, because the first honest question
+anyone asks is *what can I actually run*, and the answer is `cargo test`.
+
+| Milestone | Status |
+|---|---|
+| Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~9.4k lines of Rust, 197 tests |
+| **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
+| Benchmarks + maintainer handover | **Done** — and the benchmark refuted a headline claim; see above |
+| Coordinator: domain model, schema, assignment, leases | Not started |
+| Verification policy: canaries, reputation, selective replication | Not started |
+| Browser volunteer node | Not started |
+| Native worker | Not started |
+| Dashboard + live globe | Not started |
+| A real scientific workload (molecular docking) | Not started |
+
+That order was deliberate: build the hard, novel, falsifiable part first, so that if the
+window closed early, what survived would be the thing nobody else has rather than a job
+queue anyone could write.
 
 ## Contributing
 
-Contributions are welcome, and the project is explicitly built to be picked up by people
-who did not write it. Start with [CONTRIBUTING.md](CONTRIBUTING.md) and
-[ARCHITECTURE.md](ARCHITECTURE.md).
+The project is explicitly built to be picked up by people who did not write it.
+
+- **[docs/MAINTAINER.md](docs/MAINTAINER.md)** — the state of the project, honestly: what
+  works, what does not, the seven invariants that must not be broken, and what to do with
+  your first hour, day and week.
+- **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** — nine specified pieces of real
+  work, sized, each with where to start and how you know you are done.
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** — how the pieces fit, and why determinism is a hard
+  requirement rather than a nice property.
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — setup, tests, and the one rule that is not
+  negotiable.
 
 ## Licence
 

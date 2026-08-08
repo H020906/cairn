@@ -41,6 +41,20 @@ The insight is that **verification and re-execution are not the same thing.** BO
 full re-execution cost on every unit in order to catch the rare liar. Cairn pays almost
 nothing on the honest path and makes the liar pay on the rare dishonest one.
 
+```mermaid
+flowchart TD
+    A["Work unit: WebAssembly module + input"] --> B["Volunteer executes it once,<br/>at full speed, on the host's own engine"]
+    B --> C["Returns the result AND a Merkle root over<br/>machine-state snapshots every 2^k instructions"]
+    C --> D{"Is there a second<br/>commitment for this unit?"}
+    D -->|"No — the common case"| E["Accepted after a single execution"]
+    D -->|"Yes, and it matches"| E
+    D -->|"Yes, and it differs"| F["Bisection game:<br/>log2 n rounds between the two workers"]
+    F --> G["Disagreement narrowed to<br/>one machine instruction"]
+    G --> H["Coordinator executes that one instruction<br/>from a state witness — nothing is replayed"]
+    H --> I["The party whose state transition<br/>was wrong is identified"]
+    K["Canary units and reputation"] -.->|"decide who is replicated at all"| D
+```
+
 ### 2.1 The fast path
 
 A work unit is a deterministic WebAssembly program plus its input. A volunteer executes it
@@ -81,6 +95,28 @@ Round 2:  disagree over [0, N/2) or [N/2, N)         → both reveal midpoint of
 Round log₂(N): disagree over a single instruction i
 Final:    coordinator executes instruction i alone, on the instrumented interpreter,
           and learns which worker lied.
+```
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant A as Worker A
+    participant C as Coordinator
+    participant B as Worker B
+    Note over A,B: Commitments differ somewhere in steps 0..N
+    loop log2 N rounds
+        C->>A: reveal your state at the midpoint of the disputed range
+        C->>B: reveal your state at the midpoint of the disputed range
+        A-->>C: hash
+        B-->>C: hash
+        Note over C: hashes equal → they diverged later, keep the upper half<br/>hashes differ → they diverged earlier, keep the lower half
+    end
+    Note over A,B: Disputed range is now a single instruction i
+    A-->>C: state witness for step i + Merkle proofs
+    B-->>C: state witness for step i + Merkle proofs
+    Note over C: rebuild the commitment from the witness and check it<br/>equals the root bisection already established
+    C->>C: execute instruction i — once
+    Note over C: whoever's claimed post-state does not match, loses
 ```
 
 The coordinator's work is **one instruction**, not N: `O(log N)` messages, and compute that
@@ -137,21 +173,32 @@ afterthought.
 
 ## 4. Components
 
+```mermaid
+flowchart LR
+    BW["browser tab<br/>Rust to WASM worker"]
+    NW["native worker<br/>Rust + SQLite"]
+    UI["dashboard<br/>React 19 + three.js"]
+    CO["Cairn Coordinator<br/>Java 21 / Spring Boot 3<br/>assignment · leases · reputation<br/>canary injection · dispute referee"]
+    PG[("PostgreSQL<br/>units, results,<br/>traces, disputes")]
+    RD[("Redis<br/>queues, leases,<br/>heartbeats, pub/sub")]
+    RT["runtime/ — Rust<br/>determinism validator · instrumentation pass<br/>interpreter · trace commitment · arbitration"]
+
+    BW --> CO
+    NW --> CO
+    UI --> CO
+    CO --> PG
+    CO --> RD
+    BW -.->|"runs the same<br/>instrumented bytes"| RT
+    NW -.-> RT
+    CO -.->|"arbitration only"| RT
+
+    classDef unbuilt stroke-dasharray:6 4,color:#888,stroke:#888
+    class BW,NW,UI,CO,PG,RD unbuilt
 ```
-                        ┌──────────────────────────────┐
-   browser tab ────────►│                              │
-   (WASM worker)        │      Cairn Coordinator       │
-                        │      Java 21 / Spring Boot 3 │
-   native worker ──────►│                              │
-   (Rust + SQLite)      │  assignment · leases ·       │
-                        │  reputation · dispute referee│
-   React + three.js ───►│                              │
-   (dashboard)          └───────┬──────────────┬───────┘
-                                │              │
-                         PostgreSQL          Redis
-                    (units, results,   (queues, leases,
-                     traces, disputes)  heartbeats, pubsub)
-```
+
+**Solid box = exists. Dashed = designed, not built.** Today that is one box out of seven:
+`runtime/`. See [docs/MAINTAINER.md](docs/MAINTAINER.md) for what that means in practice
+before you plan work against this diagram.
 
 ### `runtime/` — Rust
 The deterministic execution kernel. Two engines behind one interface:
@@ -217,5 +264,13 @@ genuinely useful.
 
 ## 7. Status
 
-Under active construction. See `docs/adr/` for the decisions behind the above, and the
-project roadmap in `README.md` for what is built and what is not.
+Under active construction, and **most of this document describes intent rather than code.**
+The Rust runtime exists and is finished end to end; nothing else in §4 has been written.
+
+- **[docs/MAINTAINER.md](docs/MAINTAINER.md)** — what works, what does not, the invariants
+  that must not be broken, and where to start. Read this before planning any work.
+- **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** — nine specified pieces of work,
+  sized.
+- **[docs/adr/](docs/adr/)** — the decisions behind the above, including
+  [ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md), which refutes
+  part of ADR-0001.
