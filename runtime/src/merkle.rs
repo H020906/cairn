@@ -25,12 +25,15 @@
 //! round up to the same capacity — 5 pages and 8 pages, say — produce the same root when
 //! their contents match. The page count is therefore **not** authenticated here.
 //!
-//! This is deliberate rather than overlooked. Memory size is declared in the work unit's
-//! manifest, the manifest hash is part of the unit's identity, and both parties to a dispute
-//! are by definition arbitrating the same unit. Binding the page count into the root as well
-//! would require [`verify`] to take it as a parameter, for no gain the manifest does not
-//! already provide. If the tree is ever reused in a context where the page count is *not*
-//! independently authenticated, this must be revisited.
+//! This is deliberate rather than overlooked. Binding the page count into the root would
+//! require [`verify`] to take it as a parameter, and the page count is authenticated one level
+//! up instead: [`crate::state::hash_memory`] commits to it alongside this root.
+//!
+//! That indirection is load-bearing, not cosmetic. The tree is sized once to the memory's
+//! declared *maximum* and pages past the current end read as zero, so `memory.grow` does not
+//! resize it — which means a worker that had grown its memory and one that had not would
+//! produce the same root while the extra pages were still blank. They are different states,
+//! because `memory.size` returns different values, and `hash_memory` is what tells them apart.
 
 // Index arithmetic here is structural: every index is derived from `capacity`, which is a
 // power of two, and the node array is allocated as `2 * capacity`. Bounds are guaranteed by

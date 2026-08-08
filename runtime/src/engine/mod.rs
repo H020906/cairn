@@ -15,5 +15,9 @@
 //!   the machine because this is where transcription risk concentrates, and it can be tested
 //!   exhaustively without one.
 
+//! - [`machine`] — the interpreter itself: state, control flow, and the single-step function
+//!   arbitration calls.
+
 pub mod image;
+pub mod machine;
 pub mod numeric;

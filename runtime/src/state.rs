@@ -45,6 +45,18 @@ const DOMAIN_STATE: u8 = 0x02;
 /// Domain separator for a hashed sequence of values.
 const DOMAIN_VALUES: u8 = 0x03;
 
+/// Domain separator for the linear-memory commitment.
+const DOMAIN_MEMORY: u8 = 0x04;
+
+/// Domain separator for one call frame.
+const DOMAIN_FRAME: u8 = 0x05;
+
+/// Domain separator for a frame's label stack.
+const DOMAIN_LABELS: u8 = 0x06;
+
+/// Domain separator for the call stack as a whole.
+const DOMAIN_CALL_STACK: u8 = 0x07;
+
 /// A WebAssembly numeric value, as it appears on the operand stack, in a local, or in a global.
 ///
 /// Reference types are absent by construction: [`crate::validate`] rejects any module that
@@ -127,6 +139,97 @@ pub fn hash_values(values: &[Value]) -> Hash {
     hasher.update(&(values.len() as u64).to_le_bytes());
     for value in values {
         hasher.update(&value.encode());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Commit to linear memory: its contents *and* its current size.
+///
+/// [`crate::merkle::PageTree`] deliberately does not authenticate its own page count, on the
+/// grounds that the work unit's manifest fixes the memory size. That reasoning holds for the
+/// declared maximum and not for the current size, because `memory.grow` makes the page count
+/// observable state that changes during execution — a program can read it back with
+/// `memory.size` and branch on it.
+///
+/// So the page tree is sized once to the declared maximum, pages past the current end read as
+/// zero, and the page count is bound here instead. Without this, a worker that had grown its
+/// memory and one that had not would commit to the same root whenever the extra pages were
+/// still blank.
+#[must_use]
+pub fn hash_memory(pages: u32, page_tree_root: &Hash) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_MEMORY]);
+    hasher.update(&pages.to_le_bytes());
+    hasher.update(page_tree_root);
+    *hasher.finalize().as_bytes()
+}
+
+/// One entry of a frame's label stack, reduced to what a branch depends on.
+///
+/// Strictly, labels are derivable from the function and instruction index: WebAssembly
+/// validation assigns every program point a unique operand-stack height and enclosing block
+/// structure. They are committed anyway. Relying on that derivation would make the soundness
+/// of the commitment depend on a subtle property of validation rather than on what the
+/// interpreter actually holds, and snapshots are thousands of instructions apart, so the
+/// hashing costs nothing worth arguing about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelDigest {
+    /// Instruction index a branch to this label jumps to.
+    pub branch_target: u32,
+    /// Number of values a branch to this label preserves.
+    pub arity: u32,
+    /// Operand-stack height a branch truncates to.
+    pub stack_height: u32,
+    /// Whether this label belongs to a `loop`, which a branch re-enters rather than exits.
+    pub is_loop: bool,
+}
+
+/// Commit to a frame's label stack, innermost last.
+#[must_use]
+pub fn hash_labels(labels: &[LabelDigest]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_LABELS]);
+    hasher.update(&(labels.len() as u64).to_le_bytes());
+    for label in labels {
+        hasher.update(&label.branch_target.to_le_bytes());
+        hasher.update(&label.arity.to_le_bytes());
+        hasher.update(&label.stack_height.to_le_bytes());
+        hasher.update(&[u8::from(label.is_loop)]);
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// One call frame, reduced to hashes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FrameDigest {
+    /// Index of the function this frame is executing.
+    pub function: u32,
+    /// Instruction index to resume at within that function.
+    pub instruction: u32,
+    /// Operand-stack height this frame was entered at.
+    pub stack_base: u32,
+    /// Number of values the frame returns.
+    pub arity: u32,
+    /// [`hash_values`] over the frame's locals, parameters first.
+    pub locals: Hash,
+    /// [`hash_labels`] over the frame's label stack.
+    pub labels: Hash,
+}
+
+/// Commit to the call stack, outermost first.
+#[must_use]
+pub fn hash_frames(frames: &[FrameDigest]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_CALL_STACK]);
+    hasher.update(&(frames.len() as u64).to_le_bytes());
+    for frame in frames {
+        hasher.update(&[DOMAIN_FRAME]);
+        hasher.update(&frame.function.to_le_bytes());
+        hasher.update(&frame.instruction.to_le_bytes());
+        hasher.update(&frame.stack_base.to_le_bytes());
+        hasher.update(&frame.arity.to_le_bytes());
+        hasher.update(&frame.locals);
+        hasher.update(&frame.labels);
     }
     *hasher.finalize().as_bytes()
 }
@@ -349,6 +452,152 @@ mod tests {
             fuel: Fuel::ZERO,
         };
         assert_ne!(state.root(), empty_values);
+    }
+
+    #[test]
+    fn memory_growth_changes_the_commitment_even_when_the_new_pages_are_blank() {
+        // The reason `hash_memory` exists. A worker that grew its memory and one that did not
+        // hold identical bytes while the extra pages are still zero, but `memory.size` returns
+        // different values, so they are different states.
+        let root = PageTree::new(64).root();
+        assert_ne!(hash_memory(1, &root), hash_memory(2, &root));
+    }
+
+    #[test]
+    fn memory_contents_still_change_the_commitment() {
+        let blank = PageTree::new(4).root();
+        let mut written = PageTree::new(4);
+        written
+            .set_page(0, &vec![7u8; crate::merkle::PAGE_SIZE])
+            .unwrap();
+        assert_ne!(hash_memory(4, &blank), hash_memory(4, &written.root()));
+    }
+
+    #[test]
+    fn every_label_field_changes_the_label_hash() {
+        // A branch's behaviour depends on all four, so all four must be bound.
+        let base = LabelDigest {
+            branch_target: 10,
+            arity: 1,
+            stack_height: 3,
+            is_loop: false,
+        };
+        let reference = hash_labels(&[base]);
+
+        let mut target = base;
+        target.branch_target = 11;
+        assert_ne!(hash_labels(&[target]), reference, "branch target");
+
+        let mut arity = base;
+        arity.arity = 2;
+        assert_ne!(hash_labels(&[arity]), reference, "arity");
+
+        let mut height = base;
+        height.stack_height = 4;
+        assert_ne!(hash_labels(&[height]), reference, "stack height");
+
+        // A loop label is re-entered by a branch and a block label is exited, so this single
+        // bit changes where execution goes next.
+        let mut kind = base;
+        kind.is_loop = true;
+        assert_ne!(hash_labels(&[kind]), reference, "loop flag");
+    }
+
+    #[test]
+    fn label_and_frame_stacks_are_depth_bound() {
+        let label = LabelDigest {
+            branch_target: 1,
+            arity: 0,
+            stack_height: 0,
+            is_loop: false,
+        };
+        assert_ne!(hash_labels(&[label]), hash_labels(&[label, label]));
+        assert_ne!(hash_labels(&[]), hash_labels(&[label]));
+
+        let frame = FrameDigest {
+            function: 1,
+            instruction: 2,
+            stack_base: 0,
+            arity: 0,
+            locals: hash_values(&[]),
+            labels: hash_labels(&[]),
+        };
+        assert_ne!(hash_frames(&[frame]), hash_frames(&[frame, frame]));
+        assert_ne!(hash_frames(&[]), hash_frames(&[frame]));
+    }
+
+    #[test]
+    fn every_frame_field_changes_the_call_stack_hash() {
+        let base = FrameDigest {
+            function: 3,
+            instruction: 4,
+            stack_base: 5,
+            arity: 1,
+            locals: hash_values(&[Value::I32(1)]),
+            labels: hash_labels(&[]),
+        };
+        let reference = hash_frames(&[base]);
+
+        let mut function = base;
+        function.function = 4;
+        assert_ne!(hash_frames(&[function]), reference, "function");
+
+        let mut instruction = base;
+        instruction.instruction = 5;
+        assert_ne!(hash_frames(&[instruction]), reference, "instruction");
+
+        let mut stack_base = base;
+        stack_base.stack_base = 6;
+        assert_ne!(hash_frames(&[stack_base]), reference, "stack base");
+
+        let mut arity = base;
+        arity.arity = 2;
+        assert_ne!(hash_frames(&[arity]), reference, "arity");
+
+        let mut locals = base;
+        locals.locals = hash_values(&[Value::I32(2)]);
+        assert_ne!(hash_frames(&[locals]), reference, "locals");
+
+        let mut labels = base;
+        labels.labels = hash_labels(&[LabelDigest {
+            branch_target: 1,
+            arity: 0,
+            stack_height: 0,
+            is_loop: false,
+        }]);
+        assert_ne!(hash_frames(&[labels]), reference, "labels");
+    }
+
+    #[test]
+    fn frame_order_matters() {
+        // The call stack is ordered: A calling B is not B calling A.
+        let a = FrameDigest {
+            function: 1,
+            instruction: 0,
+            stack_base: 0,
+            arity: 0,
+            locals: hash_values(&[]),
+            labels: hash_labels(&[]),
+        };
+        let b = FrameDigest { function: 2, ..a };
+        assert_ne!(hash_frames(&[a, b]), hash_frames(&[b, a]));
+    }
+
+    #[test]
+    fn the_new_domains_do_not_collide_with_the_old_ones() {
+        // Five hash kinds now share this module. A collision between any two would let a
+        // worker present one as another.
+        let empty_values = hash_values(&[]);
+        let empty_labels = hash_labels(&[]);
+        let empty_frames = hash_frames(&[]);
+        let memory = hash_memory(0, &[0; 32]);
+
+        let all = [empty_values, empty_labels, empty_frames, memory];
+        for (i, a) in all.iter().enumerate() {
+            for b in all.iter().skip(i + 1) {
+                assert_ne!(a, b, "domain collision");
+            }
+        }
     }
 
     #[test]
