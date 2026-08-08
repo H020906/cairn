@@ -30,7 +30,7 @@ use wasmparser::{BlockType, Operator, ValType};
 use crate::engine::image::{DataSegment, HostFunction, Image, MemorySpec};
 use crate::engine::numeric::{self, Trap};
 use crate::fuel::{Charge, Fuel, FuelMeter};
-use crate::merkle::{Hash, PageTree, PAGE_SIZE};
+use crate::merkle::{self, Hash, PageTree, PartialTree, PAGE_SIZE};
 use crate::state::{self, FrameDigest, LabelDigest, ProgramCounter, StateCommitment, Value};
 
 /// Execution limits, taken from the work unit's manifest.
@@ -110,17 +110,43 @@ pub struct Trace {
     pub output: Vec<u8>,
 }
 
+/// How a memory's commitment is backed.
+///
+/// Ordinary execution holds the whole page tree. A machine rebuilt from a witness holds only
+/// the pages that were supplied and the sibling hashes their proofs revealed — enough to
+/// recompute the root after writing to those pages, and nothing more.
+#[derive(Debug, Clone)]
+enum Backing {
+    /// The whole memory is present.
+    Full(PageTree),
+    /// Reconstructed from proofs for adjudication.
+    Witnessed {
+        tree: PartialTree,
+        /// The last root the reconstruction could derive.
+        ///
+        /// Reached for only if [`PartialTree::root`] returns `None`, which cannot happen once
+        /// the reconstruction has been checked against the agreed root at restore time:
+        /// writing to a supplied page never removes information. Keeping the previous root is
+        /// preferable to fabricating one.
+        last_root: Hash,
+    },
+}
+
 /// Linear memory: the bytes a program sees, and the commitment a verifier checks.
 #[derive(Debug, Clone)]
 struct Memory {
     bytes: Vec<u8>,
     pages: u32,
     max_pages: u32,
-    /// Sized once to `max_pages`, so `memory.grow` never reshapes it. Pages past the current
-    /// end read as zero; [`state::hash_memory`] binds the page count separately.
-    tree: PageTree,
+    backing: Backing,
     /// Pages written since the last commitment. A snapshot rehashes only these.
     dirty: BTreeSet<u32>,
+    /// When `Some`, only these pages were supplied by a witness. Touching anything else means
+    /// the witness was incomplete, which is a different thing from reading zeroes.
+    resident: Option<BTreeSet<u32>>,
+    /// When `Some`, every page touched is recorded, so a party can discover which pages a
+    /// witness must carry.
+    accessed: Option<BTreeSet<u32>>,
 }
 
 impl Memory {
@@ -130,8 +156,12 @@ impl Memory {
             bytes: vec![0; pages as usize * PAGE_SIZE],
             pages,
             max_pages: spec.maximum_pages,
-            tree: PageTree::new(spec.maximum_pages.max(1) as usize),
+            // Sized once to the declared maximum, so `memory.grow` never reshapes it. Pages
+            // past the current end read as zero; `state::hash_memory` binds the count.
+            backing: Backing::Full(PageTree::new(spec.maximum_pages.max(1) as usize)),
             dirty: BTreeSet::new(),
+            resident: None,
+            accessed: None,
         }
     }
 
@@ -148,14 +178,41 @@ impl Memory {
         Ok(address as usize..end as usize)
     }
 
-    fn read(&self, address: u64, len: usize) -> Result<&[u8], Trap> {
+    /// Check that every page an access spans was supplied, and record that it was touched.
+    ///
+    /// In ordinary execution both checks are `None` and this is a pair of branches.
+    fn touch(&mut self, start: usize, len: usize) -> Result<(), Trap> {
+        if len == 0 || (self.resident.is_none() && self.accessed.is_none()) {
+            return Ok(());
+        }
+        let first = (start / PAGE_SIZE) as u32;
+        let last = ((start + len - 1) / PAGE_SIZE) as u32;
+
+        if let Some(resident) = &self.resident {
+            for page in first..=last {
+                if !resident.contains(&page) {
+                    return Err(Trap::WitnessIncomplete { page });
+                }
+            }
+        }
+        if let Some(accessed) = &mut self.accessed {
+            for page in first..=last {
+                accessed.insert(page);
+            }
+        }
+        Ok(())
+    }
+
+    fn read(&mut self, address: u64, len: usize) -> Result<&[u8], Trap> {
         let range = self.range(address, len)?;
+        self.touch(range.start, len)?;
         self.bytes.get(range).ok_or(Trap::MemoryOutOfBounds)
     }
 
     fn write(&mut self, address: u64, data: &[u8]) -> Result<(), Trap> {
         let range = self.range(address, data.len())?;
         let start = range.start;
+        self.touch(start, data.len())?;
         let slot = self.bytes.get_mut(range).ok_or(Trap::MemoryOutOfBounds)?;
         slot.copy_from_slice(data);
         self.mark_dirty(start, data.len());
@@ -166,6 +223,7 @@ impl Memory {
     fn fill(&mut self, address: u64, len: usize, byte: u8) -> Result<(), Trap> {
         let range = self.range(address, len)?;
         let start = range.start;
+        self.touch(start, len)?;
         let slot = self.bytes.get_mut(range).ok_or(Trap::MemoryOutOfBounds)?;
         slot.fill(byte);
         self.mark_dirty(start, len);
@@ -176,6 +234,8 @@ impl Memory {
     fn copy(&mut self, dest: u64, src: u64, len: usize) -> Result<(), Trap> {
         let src_range = self.range(src, len)?;
         let dest_range = self.range(dest, len)?;
+        self.touch(src_range.start, len)?;
+        self.touch(dest_range.start, len)?;
         self.bytes.copy_within(src_range, dest_range.start);
         self.mark_dirty(dest_range.start, len);
         Ok(())
@@ -190,6 +250,12 @@ impl Memory {
         for page in first..=last {
             self.dirty.insert(page as u32);
         }
+    }
+
+    /// The contents of one page, for witness capture.
+    fn page(&self, index: u32) -> Option<&[u8]> {
+        let start = (index as usize).checked_mul(PAGE_SIZE)?;
+        self.bytes.get(start..start.checked_add(PAGE_SIZE)?)
     }
 
     /// Grow by `delta` pages, returning the previous size, or `-1` if it does not fit.
@@ -212,16 +278,225 @@ impl Memory {
     }
 
     fn commit(&mut self) -> Hash {
-        for page in std::mem::take(&mut self.dirty) {
-            let start = page as usize * PAGE_SIZE;
-            if let Some(bytes) = self.bytes.get(start..start + PAGE_SIZE) {
-                // The tree is sized to `max_pages`, so every live page index is in range.
-                let _ = self.tree.set_page(page as usize, bytes);
+        let dirty = std::mem::take(&mut self.dirty);
+        match &mut self.backing {
+            Backing::Full(tree) => {
+                for page in dirty {
+                    let start = page as usize * PAGE_SIZE;
+                    if let Some(bytes) = self.bytes.get(start..start + PAGE_SIZE) {
+                        // The tree is sized to `max_pages`, so every live index is in range.
+                        let _ = tree.set_page(page as usize, bytes);
+                    }
+                }
+                state::hash_memory(self.pages, &tree.root())
+            }
+            Backing::Witnessed { tree, last_root } => {
+                for page in dirty {
+                    let start = page as usize * PAGE_SIZE;
+                    if let Some(bytes) = self.bytes.get(start..start + PAGE_SIZE) {
+                        // A write to an unsupplied page was already refused by `touch`.
+                        let _ = tree.set_page(page as usize, bytes);
+                    }
+                }
+                if let Some(root) = tree.root() {
+                    *last_root = root;
+                }
+                state::hash_memory(self.pages, last_root)
             }
         }
-        state::hash_memory(self.pages, &self.tree.root())
     }
 }
+
+/// One label of a frame's label stack, as a witness carries it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LabelWitness {
+    /// Instruction index a branch to this label jumps to.
+    pub branch_target: u32,
+    /// Values a branch to this label preserves.
+    pub arity: u32,
+    /// Operand-stack height a branch truncates to.
+    pub stack_height: u32,
+    /// Matching `end`, used when an `else` is reached by falling through.
+    pub end: u32,
+    /// Whether this label belongs to a `loop`, which a branch re-enters.
+    pub is_loop: bool,
+}
+
+/// One call frame, as a witness carries it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FrameWitness {
+    /// The function this frame is executing.
+    pub function: u32,
+    /// Instruction index to resume at.
+    pub instruction: u32,
+    /// Parameters followed by declared locals.
+    pub locals: Vec<Value>,
+    /// Operand-stack height this frame was entered at.
+    pub stack_base: u32,
+    /// Values the frame returns.
+    pub arity: u32,
+    /// The frame's label stack, outermost first.
+    pub labels: Vec<LabelWitness>,
+}
+
+/// One memory page and the proof binding it to the memory root.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageWitness {
+    /// Page index.
+    pub index: u32,
+    /// Exactly [`PAGE_SIZE`] bytes.
+    pub bytes: Vec<u8>,
+    /// Sibling path from this page's leaf to the memory root.
+    pub proof: Vec<Hash>,
+}
+
+/// Enough state to execute one instruction, and to prove it was the state both parties agreed
+/// on.
+///
+/// # What is carried, and why the split
+///
+/// Everything except memory is carried whole: globals, the operand stack, the call stack with
+/// its locals and labels, the fuel and step counters. Those are naturally small — operand
+/// stacks are tens of values deep and globals are tens of entries — so proving them would cost
+/// more than sending them.
+///
+/// Memory is the part measured in megabytes, so only the pages the disputed instruction
+/// actually touches are carried, each with a Merkle proof binding it to the memory root. That
+/// is what keeps an adjudicator's work independent of how much memory the workload declared.
+///
+/// # The one check that makes it trustworthy
+///
+/// [`Witness::commitment`] rebuilds a [`StateCommitment`] from the witness alone. If its root
+/// equals the state root both parties agreed on during bisection, the witness is the agreed
+/// state — no other check is needed, because the commitment covers every part of it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Witness {
+    /// The module's globals, in index order.
+    pub globals: Vec<Value>,
+    /// The operand stack, bottom to top.
+    pub operand_stack: Vec<Value>,
+    /// The call stack, outermost first.
+    pub frames: Vec<FrameWitness>,
+    /// Current memory size in pages.
+    pub memory_pages: u32,
+    /// The memory's declared ceiling, needed to size the reconstruction.
+    pub memory_max_pages: u32,
+    /// Root of the memory the pages below are proved against.
+    pub memory_root: Hash,
+    /// The pages the disputed instruction needs.
+    pub pages: Vec<PageWitness>,
+    /// Which data segments have been dropped. Changes what `memory.init` copies, so it is
+    /// state and is committed to.
+    pub dropped_data: Vec<bool>,
+    /// Which element segments have been dropped.
+    pub dropped_elements: Vec<bool>,
+    /// Fuel consumed.
+    pub fuel: Fuel,
+    /// Instructions executed.
+    pub steps: u64,
+}
+
+impl Witness {
+    /// The state commitment this witness describes.
+    ///
+    /// Computed from the witness alone, with no interpreter involved. Comparing its
+    /// [`StateCommitment::root`] against the root the parties agreed on is what proves the
+    /// witness was not fabricated.
+    #[must_use]
+    pub fn commitment(&self) -> StateCommitment {
+        let frames: Vec<FrameDigest> = self
+            .frames
+            .iter()
+            .map(|frame| FrameDigest {
+                function: frame.function,
+                instruction: frame.instruction,
+                stack_base: frame.stack_base,
+                arity: frame.arity,
+                locals: state::hash_values(&frame.locals),
+                labels: state::hash_labels(
+                    &frame
+                        .labels
+                        .iter()
+                        .map(|l| LabelDigest {
+                            branch_target: l.branch_target,
+                            arity: l.arity,
+                            stack_height: l.stack_height,
+                            is_loop: l.is_loop,
+                        })
+                        .collect::<Vec<_>>(),
+                ),
+            })
+            .collect();
+
+        StateCommitment {
+            memory: state::hash_memory(self.memory_pages, &self.memory_root),
+            globals: state::hash_values(&self.globals),
+            operand_stack: state::hash_values(&self.operand_stack),
+            call_stack: state::hash_frames(&frames),
+            segments: state::hash_segments(&self.dropped_data, &self.dropped_elements),
+            program_counter: self.frames.last().map_or(
+                ProgramCounter {
+                    function: 0,
+                    instruction: 0,
+                },
+                |frame| ProgramCounter {
+                    function: frame.function,
+                    instruction: frame.instruction,
+                },
+            ),
+            fuel: self.fuel,
+        }
+    }
+}
+
+/// Why a witness could not be turned back into a machine.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WitnessError {
+    /// A page was not [`PAGE_SIZE`] bytes.
+    BadPageSize {
+        /// The page index.
+        page: u32,
+        /// The length supplied.
+        got: usize,
+    },
+    /// A page's proof does not bind it to the witness's memory root.
+    ///
+    /// Either the page contents or the proof was altered.
+    BadPageProof {
+        /// The page index.
+        page: u32,
+    },
+    /// The supplied pages and proofs do not reconstruct the claimed memory root.
+    ///
+    /// Every individual proof verified, so this means they are proofs against a *different*
+    /// tree than the one claimed, or too few were sent to determine the root.
+    RootNotReconstructed,
+    /// The witness has no call frames, so there is no instruction to execute.
+    NoFrames,
+    /// The witness's limits were rejected by the fuel meter.
+    BadLimits,
+}
+
+impl core::fmt::Display for WitnessError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::BadPageSize { page, got } => {
+                write!(f, "page {page} is {got} bytes, expected {PAGE_SIZE}")
+            }
+            Self::BadPageProof { page } => {
+                write!(f, "page {page} does not belong to the claimed memory root")
+            }
+            Self::RootNotReconstructed => write!(
+                f,
+                "the supplied pages do not reconstruct the claimed memory root"
+            ),
+            Self::NoFrames => write!(f, "the witness has no frames, so nothing can execute"),
+            Self::BadLimits => write!(f, "the witness's execution limits were rejected"),
+        }
+    }
+}
+
+impl std::error::Error for WitnessError {}
 
 /// A branch destination within a function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -284,19 +559,7 @@ impl<'a> Machine<'a> {
             }
         }
 
-        let table_size = image.table.map_or(0, |t| t.initial) as usize;
-        let mut table = vec![None; table_size];
-        for segment in &image.elements {
-            if let crate::engine::image::ElementSegment::Active { offset, functions } = segment {
-                for (i, function) in functions.iter().enumerate() {
-                    let slot = (*offset as usize)
-                        .checked_add(i)
-                        .ok_or(Trap::TableOutOfBounds)?;
-                    *table.get_mut(slot).ok_or(Trap::TableOutOfBounds)? = Some(*function);
-                }
-            }
-        }
-
+        let table = install_table(image)?;
         let globals = image.globals.iter().map(|g| g.init).collect();
         let dropped_data = vec![false; image.data.len()];
         let dropped_elements = vec![false; image.elements.len()];
@@ -353,6 +616,7 @@ impl<'a> Machine<'a> {
             globals: state::hash_values(&self.globals),
             operand_stack: state::hash_values(&self.stack),
             call_stack: state::hash_frames(&frames),
+            segments: state::hash_segments(&self.dropped_data, &self.dropped_elements),
             program_counter: self.program_counter(),
             fuel: self.meter.consumed(),
         }
@@ -398,6 +662,218 @@ impl<'a> Machine<'a> {
     #[must_use]
     pub fn is_finished(&self) -> bool {
         self.finished
+    }
+
+    /// Capture the current state, carrying the named memory pages with their proofs.
+    ///
+    /// Only meaningful on a machine backed by a full page tree — a machine already rebuilt
+    /// from a witness cannot produce proofs it was never given, and returns an empty page
+    /// list.
+    #[must_use]
+    pub fn witness(&mut self, pages: &[u32]) -> Witness {
+        // Flush any pending writes so the proofs are taken against the current root.
+        let _ = self.memory.commit();
+
+        let mut carried = Vec::new();
+        for &index in pages {
+            let Some(bytes) = self.memory.page(index).map(<[u8]>::to_vec) else {
+                continue;
+            };
+            let Backing::Full(tree) = &mut self.memory.backing else {
+                // A machine already rebuilt from a witness cannot produce proofs it was never
+                // given.
+                break;
+            };
+            let Some(proof) = tree.proof(index as usize) else {
+                continue;
+            };
+            carried.push(PageWitness {
+                index,
+                bytes,
+                proof,
+            });
+        }
+
+        let memory_root = match &mut self.memory.backing {
+            Backing::Full(tree) => tree.root(),
+            Backing::Witnessed { last_root, .. } => *last_root,
+        };
+
+        Witness {
+            globals: self.globals.clone(),
+            operand_stack: self.stack.clone(),
+            frames: self
+                .frames
+                .iter()
+                .map(|frame| FrameWitness {
+                    function: frame.function,
+                    instruction: frame.pc,
+                    locals: frame.locals.clone(),
+                    stack_base: frame.stack_base,
+                    arity: frame.arity,
+                    labels: frame
+                        .labels
+                        .iter()
+                        .map(|l| LabelWitness {
+                            branch_target: l.branch_target,
+                            arity: l.arity,
+                            stack_height: l.stack_height,
+                            end: l.end,
+                            is_loop: l.is_loop,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            memory_pages: self.memory.pages,
+            memory_max_pages: self.memory.max_pages,
+            memory_root,
+            pages: carried,
+            dropped_data: self.dropped_data.clone(),
+            dropped_elements: self.dropped_elements.clone(),
+            fuel: self.meter.consumed(),
+            steps: self.steps,
+        }
+    }
+
+    /// Capture a witness sufficient to execute the next instruction.
+    ///
+    /// Which pages that instruction needs is not knowable in advance, so this clones the
+    /// machine, steps the clone with access tracking on, and carries whatever it touched. The
+    /// clone is discarded; this machine does not advance.
+    #[must_use]
+    pub fn witness_for_next_step(&mut self) -> Witness {
+        let mut probe = self.clone();
+        probe.memory.accessed = Some(BTreeSet::new());
+        let _ = probe.step();
+        let pages: Vec<u32> = probe
+            .memory
+            .accessed
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+            .collect();
+        self.witness(&pages)
+    }
+
+    /// Rebuild a machine from a witness, ready to execute one instruction.
+    ///
+    /// Every page's proof is checked against the witness's memory root, and the reconstruction
+    /// as a whole must reproduce that root. Passing both means the memory the machine will
+    /// read is the memory the witness claims — for the pages it carries. Touching any other
+    /// page traps with [`Trap::WitnessIncomplete`] rather than reading zeroes.
+    ///
+    /// # Errors
+    ///
+    /// See [`WitnessError`].
+    /// `input` comes from the work unit rather than from the witness. The coordinator
+    /// dispatched the unit and holds the input authoritatively; taking it from a party would
+    /// let them change what the disputed instruction reads.
+    pub fn restore(
+        image: &'a Image<'a>,
+        witness: &Witness,
+        input: Vec<u8>,
+        limits: Limits,
+    ) -> Result<Self, WitnessError> {
+        if witness.frames.is_empty() {
+            return Err(WitnessError::NoFrames);
+        }
+
+        let mut reconstruction = PartialTree::new(witness.memory_max_pages.max(1) as usize);
+        let mut bytes = vec![0u8; witness.memory_pages as usize * PAGE_SIZE];
+        let mut resident = BTreeSet::new();
+
+        for page in &witness.pages {
+            if page.bytes.len() != PAGE_SIZE {
+                return Err(WitnessError::BadPageSize {
+                    page: page.index,
+                    got: page.bytes.len(),
+                });
+            }
+            if !merkle::verify(
+                &witness.memory_root,
+                page.index as usize,
+                &page.bytes,
+                &page.proof,
+            ) {
+                return Err(WitnessError::BadPageProof { page: page.index });
+            }
+            reconstruction
+                .insert(page.index as usize, &page.bytes, &page.proof)
+                .map_err(|_| WitnessError::BadPageProof { page: page.index })?;
+
+            let start = page.index as usize * PAGE_SIZE;
+            if let Some(slot) = bytes.get_mut(start..start + PAGE_SIZE) {
+                slot.copy_from_slice(&page.bytes);
+            }
+            resident.insert(page.index);
+        }
+
+        // Individually valid proofs are not enough when the instruction writes: they must also
+        // be proofs against *this* root and enough of them to re-derive it afterwards.
+        //
+        // A witness carrying no pages skips the check, and legitimately so. Most instructions
+        // touch no memory at all, and there is nothing to reconstruct from. The memory root is
+        // still authenticated — it is part of the commitment the caller checks against the
+        // agreed root — and any instruction that then reaches for a page traps with
+        // `WitnessIncomplete` rather than reading zeroes.
+        if !witness.pages.is_empty() && reconstruction.root() != Some(witness.memory_root) {
+            return Err(WitnessError::RootNotReconstructed);
+        }
+
+        let meter = FuelMeter::restore(witness.fuel, limits.fuel, limits.snapshot_interval_log2)
+            .map_err(|_| WitnessError::BadLimits)?;
+
+        Ok(Self {
+            image,
+            limits,
+            memory: Memory {
+                bytes,
+                pages: witness.memory_pages,
+                max_pages: witness.memory_max_pages,
+                backing: Backing::Witnessed {
+                    tree: reconstruction,
+                    last_root: witness.memory_root,
+                },
+                dirty: BTreeSet::new(),
+                resident: Some(resident),
+                accessed: None,
+            },
+            globals: witness.globals.clone(),
+            stack: witness.operand_stack.clone(),
+            frames: witness
+                .frames
+                .iter()
+                .map(|frame| Frame {
+                    function: frame.function,
+                    pc: frame.instruction,
+                    locals: frame.locals.clone(),
+                    stack_base: frame.stack_base,
+                    arity: frame.arity,
+                    labels: frame
+                        .labels
+                        .iter()
+                        .map(|l| Label {
+                            branch_target: l.branch_target,
+                            arity: l.arity,
+                            stack_height: l.stack_height,
+                            end: l.end,
+                            is_loop: l.is_loop,
+                        })
+                        .collect(),
+                })
+                .collect(),
+            // Rebuilt from the module rather than sent: no instruction the interpreter
+            // implements can mutate the table, so it is a function of the image alone.
+            table: install_table(image).map_err(|_| WitnessError::BadLimits)?,
+            meter,
+            input,
+            // Output is write-only and never read back, so an adjudicator starts it empty.
+            output: Vec::new(),
+            dropped_data: witness.dropped_data.clone(),
+            dropped_elements: witness.dropped_elements.clone(),
+            steps: witness.steps,
+            finished: false,
+        })
     }
 
     /// Run to completion, recording a state root at every snapshot boundary.
@@ -1061,6 +1537,29 @@ impl<'a> Machine<'a> {
         }
         Ok(())
     }
+}
+
+/// Build the function table from the module's active element segments.
+///
+/// The table is not part of the state commitment, and does not need to be: every instruction
+/// that could mutate one — `table.set`, `table.init`, `table.copy`, `table.grow`, `table.fill`
+/// — is outside the interpreter's coverage and traps as unsupported. It is therefore a
+/// function of the module alone, which is why an adjudicator can rebuild it from the image
+/// rather than being sent it. **If table mutation is ever implemented, the table must be added
+/// to [`StateCommitment`] in the same change**, or a divergence in it would be invisible.
+fn install_table(image: &Image<'_>) -> Result<Vec<Option<u32>>, Trap> {
+    let mut table = vec![None; image.table.map_or(0, |t| t.initial) as usize];
+    for segment in &image.elements {
+        if let crate::engine::image::ElementSegment::Active { offset, functions } = segment {
+            for (i, function) in functions.iter().enumerate() {
+                let slot = (*offset as usize)
+                    .checked_add(i)
+                    .ok_or(Trap::TableOutOfBounds)?;
+                *table.get_mut(slot).ok_or(Trap::TableOutOfBounds)? = Some(*function);
+            }
+        }
+    }
+    Ok(table)
 }
 
 /// The value a freshly declared local holds.

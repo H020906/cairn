@@ -29,7 +29,8 @@
 //! each party's claim about the root after it.
 
 use crate::engine::image::Image;
-use crate::engine::machine::{Limits, Machine, Progress};
+use crate::engine::machine::{Limits, Machine, Progress, Witness, WitnessError};
+use crate::engine::numeric::Trap;
 use crate::merkle::Hash;
 
 /// Rounds after which a challenge is abandoned as malformed.
@@ -348,6 +349,130 @@ pub fn resolve(
             }
         }
     }
+}
+
+/// Who the adjudicator found to be telling the truth.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Judgment {
+    /// One party's claim matched what the instruction actually produces.
+    Guilty {
+        /// The party whose claim was wrong.
+        liar: Party,
+    },
+    /// Neither claim matched. Both parties are wrong, which is not a case the protocol can
+    /// resolve in anyone's favour — the unit goes back to the queue and both take a penalty.
+    BothWrong {
+        /// What executing the instruction actually produces, or `None` if it trapped and
+        /// there is no state after it. Not a hash, because there is none to report.
+        actual: Option<Hash>,
+    },
+    /// Both claims matched, which cannot happen: bisection only converges where they differ.
+    /// Reaching this means the verdict and the witness describe different disputes.
+    Inconsistent,
+}
+
+/// Why a disputed instruction could not be adjudicated.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AdjudicationError {
+    /// The witness does not describe the state the parties agreed on.
+    ///
+    /// Its reconstructed commitment differs from [`Verdict::agreed_root`], so whoever supplied
+    /// it fabricated or corrupted it.
+    WitnessDoesNotMatchAgreedState,
+    /// The witness could not be turned back into a machine.
+    UnusableWitness(WitnessError),
+    /// The disputed instruction could not be executed from the witness.
+    ///
+    /// A [`Trap::WitnessIncomplete`] here means the witness omitted a page the instruction
+    /// needs, which is the supplier's failure rather than a fact about the computation. Any
+    /// other trap is a real outcome and is compared like any other result.
+    ExecutionFailed(Trap),
+    /// Bisection never produced an agreed root to start from.
+    NoAgreedState,
+}
+
+impl core::fmt::Display for AdjudicationError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::WitnessDoesNotMatchAgreedState => write!(
+                f,
+                "the witness does not reconstruct the state the parties agreed on"
+            ),
+            Self::UnusableWitness(e) => write!(f, "unusable witness: {e}"),
+            Self::ExecutionFailed(t) => {
+                write!(f, "could not execute the disputed instruction: {t}")
+            }
+            Self::NoAgreedState => write!(f, "bisection produced no agreed state to execute from"),
+        }
+    }
+}
+
+impl std::error::Error for AdjudicationError {}
+
+/// Execute the disputed instruction and decide who lied.
+///
+/// # How this stays cheap
+///
+/// The adjudicator never replays the execution. It is handed the agreed state as a
+/// [`Witness`] — small state whole, memory as the handful of pages the instruction touches
+/// with proofs — verifies it against the root bisection already established, executes exactly
+/// one instruction, and compares.
+///
+/// The cost therefore depends on the *module's* declared stack depth and on how many pages one
+/// instruction can touch, and **not on the length of the disputed execution**. Arbitrating a
+/// unit that ran for a trillion instructions costs what arbitrating one that ran for a
+/// thousand costs. That is the property ADR-0001 rests on.
+///
+/// # Errors
+///
+/// See [`AdjudicationError`]. Note that a trap during the disputed instruction is *not* an
+/// error unless it is [`Trap::WitnessIncomplete`]: a trapping instruction is a legitimate
+/// outcome that a party may have claimed correctly or incorrectly.
+pub fn adjudicate(
+    image: &Image<'_>,
+    verdict: &Verdict,
+    witness: &Witness,
+    input: &[u8],
+    limits: Limits,
+) -> Result<Judgment, AdjudicationError> {
+    let Some(agreed) = verdict.agreed_root else {
+        return Err(AdjudicationError::NoAgreedState);
+    };
+
+    // The single check that makes the witness trustworthy. The commitment covers memory,
+    // globals, both stacks, the program counter and the fuel, so a witness reproducing this
+    // root is the agreed state in every respect that matters.
+    if witness.commitment().root() != agreed {
+        return Err(AdjudicationError::WitnessDoesNotMatchAgreedState);
+    }
+
+    let mut machine = Machine::restore(image, witness, input.to_vec(), limits)
+        .map_err(AdjudicationError::UnusableWitness)?;
+
+    let actual = match machine.step() {
+        Ok(_) => Some(machine.commit().root()),
+        // A witness that omits a page the instruction needs is unusable; the supplier failed.
+        Err(trap @ Trap::WitnessIncomplete { .. }) => {
+            return Err(AdjudicationError::ExecutionFailed(trap))
+        }
+        // Any other trap is a real outcome: execution stops, and a party claiming a state
+        // after it is wrong.
+        Err(_) => None,
+    };
+
+    Ok(
+        match (
+            actual == verdict.first_claim,
+            actual == verdict.second_claim,
+        ) {
+            (true, false) => Judgment::Guilty {
+                liar: Party::Second,
+            },
+            (false, true) => Judgment::Guilty { liar: Party::First },
+            (false, false) => Judgment::BothWrong { actual },
+            (true, true) => Judgment::Inconsistent,
+        },
+    )
 }
 
 /// A party that answers by re-running its own execution.
@@ -790,6 +915,342 @@ mod tests {
                 Some(snapshot.root),
                 "replay disagreed with the committed snapshot at step {}",
                 snapshot.step
+            );
+        }
+    }
+
+    // --- adjudication ------------------------------------------------------------------
+
+    /// Run a machine to `step` and capture a witness for the instruction that follows.
+    fn witness_at(
+        image: &crate::engine::image::Image<'_>,
+        input: &[u8],
+        step: Step,
+    ) -> crate::engine::machine::Witness {
+        let mut machine = Machine::new(image, input.to_vec(), Limits::default()).unwrap();
+        for _ in 0..step.get() {
+            let _ = machine.step().unwrap();
+        }
+        machine.witness_for_next_step()
+    }
+
+    /// A party that reports the truth up to a point and corrupted roots after it.
+    struct Liar<'a> {
+        honest: Replay<'a>,
+        lies_from: u64,
+    }
+
+    impl Claimant for Liar<'_> {
+        fn root_at(&mut self, step: Step) -> Result<Option<Hash>, Absent> {
+            let truth = self.honest.root_at(step)?;
+            if step.get() < self.lies_from {
+                return Ok(truth);
+            }
+            Ok(truth.map(|mut root| {
+                root[0] ^= 0xff;
+                root
+            }))
+        }
+    }
+
+    #[test]
+    fn a_witness_reproduces_what_the_original_machine_does_next() {
+        // The foundation everything else rests on. At every step of a real execution, a
+        // witness captured there must let a machine rebuilt from nothing else produce exactly
+        // the state the original machine reaches by continuing.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+        let input = b"witness me";
+
+        let mut original = Machine::new(&image, input.to_vec(), Limits::default()).unwrap();
+        let total = original.clone().run().unwrap().steps;
+        assert!(total > 10, "the test module should run for a while");
+
+        for step in 0..total {
+            let witness = original.witness_for_next_step();
+
+            let mut expected = original.clone();
+            let _ = expected.step().unwrap();
+            let expected_root = expected.commit().root();
+
+            let mut rebuilt = Machine::restore(&image, &witness, input.to_vec(), Limits::default())
+                .unwrap_or_else(|e| panic!("restore failed at step {step}: {e}"));
+            let _ = rebuilt
+                .step()
+                .unwrap_or_else(|e| panic!("step failed at step {step}: {e}"));
+
+            assert_eq!(
+                rebuilt.commit().root(),
+                expected_root,
+                "a witness at step {step} did not reproduce the next state"
+            );
+
+            let _ = original.step().unwrap();
+        }
+    }
+
+    #[test]
+    fn a_witness_carries_only_the_pages_its_instruction_needs() {
+        // The claim that makes adjudication affordable. A workload with a large memory must
+        // still produce witnesses carrying a couple of pages, because one instruction can only
+        // reach so far.
+        let module = canonical(
+            r#"(module
+                 (import "cairn" "output" (func $output (param i32 i32)))
+                 (memory (export "memory") 64 512)
+                 (func (export "cairn_run") (local $i i32)
+                   (block $done
+                     (loop $again
+                       (br_if $done (i32.ge_u (local.get $i) (i32.const 2000)))
+                       (i32.store (local.get $i) (local.get $i))
+                       (local.set $i (i32.add (local.get $i) (i32.const 4)))
+                       (br $again)))
+                   (call $output (i32.const 0) (i32.const 8))))"#,
+        );
+        let image = crate::engine::image::decode(&module).unwrap();
+
+        let mut machine = Machine::new(&image, Vec::new(), Limits::default()).unwrap();
+        let mut widest = 0;
+        for _ in 0..400 {
+            widest = widest.max(machine.witness_for_next_step().pages.len());
+            if matches!(
+                machine.step().unwrap(),
+                crate::engine::machine::Progress::Finished
+            ) {
+                break;
+            }
+        }
+        assert!(
+            widest <= 2,
+            "an instruction needed {widest} pages; a store spans at most two"
+        );
+    }
+
+    #[test]
+    fn adjudication_convicts_the_party_that_lied() {
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+        let input = b"convict";
+
+        let mut probe = Machine::new(&image, input.to_vec(), Limits::default()).unwrap();
+        let length = Step::new(probe.run().unwrap().steps);
+
+        let mut honest = Replay::new(&image, input.to_vec(), Limits::default());
+        let mut liar = Liar {
+            honest: Replay::new(&image, input.to_vec(), Limits::default()),
+            lies_from: 7,
+        };
+
+        let verdict = resolve(&mut honest, &mut liar, length).expect("should settle");
+        assert_eq!(
+            verdict.divergence,
+            Step::new(6),
+            "the instruction from step 6 to 7 is where the lie starts"
+        );
+
+        let witness = witness_at(&image, input, verdict.divergence);
+        let judgment = adjudicate(&image, &verdict, &witness, input, Limits::default()).unwrap();
+        assert_eq!(
+            judgment,
+            Judgment::Guilty {
+                liar: Party::Second
+            }
+        );
+    }
+
+    #[test]
+    fn adjudication_convicts_whichever_side_lies() {
+        // Order must not matter. Swapping the parties must swap the verdict, not preserve it.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+        let input = b"either way";
+
+        let mut probe = Machine::new(&image, input.to_vec(), Limits::default()).unwrap();
+        let length = Step::new(probe.run().unwrap().steps);
+
+        let mut liar = Liar {
+            honest: Replay::new(&image, input.to_vec(), Limits::default()),
+            lies_from: 9,
+        };
+        let mut honest = Replay::new(&image, input.to_vec(), Limits::default());
+
+        let verdict = resolve(&mut liar, &mut honest, length).unwrap();
+        let witness = witness_at(&image, input, verdict.divergence);
+        assert_eq!(
+            adjudicate(&image, &verdict, &witness, input, Limits::default()).unwrap(),
+            Judgment::Guilty { liar: Party::First }
+        );
+    }
+
+    #[test]
+    fn a_witness_from_the_wrong_state_is_refused() {
+        // The check that makes a witness trustworthy: it must reconstruct the root bisection
+        // already established. A witness captured one instruction later describes a real
+        // state, just not the agreed one.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+        let input = b"wrong state";
+
+        let mut probe = Machine::new(&image, input.to_vec(), Limits::default()).unwrap();
+        let length = Step::new(probe.run().unwrap().steps);
+
+        let mut honest = Replay::new(&image, input.to_vec(), Limits::default());
+        let mut liar = Liar {
+            honest: Replay::new(&image, input.to_vec(), Limits::default()),
+            lies_from: 8,
+        };
+        let verdict = resolve(&mut honest, &mut liar, length).unwrap();
+
+        let wrong = witness_at(&image, input, Step::new(verdict.divergence.get() + 1));
+        assert_eq!(
+            adjudicate(&image, &verdict, &wrong, input, Limits::default()).unwrap_err(),
+            AdjudicationError::WitnessDoesNotMatchAgreedState
+        );
+    }
+
+    #[test]
+    fn tampering_with_a_witness_is_refused() {
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+        let input = b"tamper";
+
+        let mut probe = Machine::new(&image, input.to_vec(), Limits::default()).unwrap();
+        let length = Step::new(probe.run().unwrap().steps);
+
+        let mut honest = Replay::new(&image, input.to_vec(), Limits::default());
+        let mut liar = Liar {
+            honest: Replay::new(&image, input.to_vec(), Limits::default()),
+            lies_from: 10,
+        };
+        let verdict = resolve(&mut honest, &mut liar, length).unwrap();
+        let genuine = witness_at(&image, input, verdict.divergence);
+
+        // Altering the small state changes the commitment, so it no longer matches the agreed
+        // root and never reaches the machine.
+        let mut altered_globals = genuine.clone();
+        altered_globals
+            .operand_stack
+            .push(crate::state::Value::I32(0xDEAD));
+        assert_eq!(
+            adjudicate(&image, &verdict, &altered_globals, input, Limits::default()).unwrap_err(),
+            AdjudicationError::WitnessDoesNotMatchAgreedState
+        );
+
+        // Altering a page's bytes breaks its proof, which is caught before the commitment is
+        // even reconstructed.
+        if let Some(page) = genuine.pages.first() {
+            let mut altered_page = genuine.clone();
+            altered_page.pages[0].bytes[0] ^= 0xff;
+            let error =
+                adjudicate(&image, &verdict, &altered_page, input, Limits::default()).unwrap_err();
+            assert_eq!(
+                error,
+                AdjudicationError::UnusableWitness(
+                    crate::engine::machine::WitnessError::BadPageProof { page: page.index }
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn a_witness_missing_a_page_the_instruction_needs_is_refused() {
+        // Dropping a page is the subtle attack: every remaining proof still verifies, so the
+        // failure has to surface when the instruction reaches for what is not there.
+        let module = canonical(
+            r#"(module
+                 (import "cairn" "output" (func $output (param i32 i32)))
+                 (memory (export "memory") 2 4)
+                 (func (export "cairn_run")
+                   (i32.store (i32.const 100) (i32.const 42))
+                   (call $output (i32.const 100) (i32.const 4))))"#,
+        );
+        let image = crate::engine::image::decode(&module).unwrap();
+
+        // Walk to the store, whose witness carries the page it writes.
+        let mut machine = Machine::new(&image, Vec::new(), Limits::default()).unwrap();
+        let mut found = None;
+        for step in 0..200u64 {
+            let witness = machine.witness_for_next_step();
+            if !witness.pages.is_empty() {
+                found = Some((Step::new(step), witness));
+                break;
+            }
+            if matches!(
+                machine.step().unwrap(),
+                crate::engine::machine::Progress::Finished
+            ) {
+                break;
+            }
+        }
+        let (step, full) = found.expect("some instruction must touch memory");
+
+        let mut stripped = full.clone();
+        stripped.pages.clear();
+
+        // The stripped witness still describes the agreed state — the memory root is carried
+        // separately — so it passes the commitment check and fails at execution.
+        let mut before = Machine::new(&image, Vec::new(), Limits::default()).unwrap();
+        for _ in 0..step.get() {
+            let _ = before.step().unwrap();
+        }
+        let agreed = before.commit().root();
+        assert_eq!(stripped.commitment().root(), agreed);
+
+        let verdict = Verdict {
+            divergence: step,
+            agreed_root: Some(agreed),
+            first_claim: Some([1; 32]),
+            second_claim: Some([2; 32]),
+            rounds: 0,
+        };
+
+        // It gets as far as executing, and fails there: reaching for a page nobody supplied
+        // must be an explicit failure and never a read of zeroes.
+        match adjudicate(&image, &verdict, &stripped, &[], Limits::default()).unwrap_err() {
+            AdjudicationError::ExecutionFailed(Trap::WitnessIncomplete { .. }) => {}
+            other => panic!("expected the missing page to be caught, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn adjudication_reports_when_both_parties_are_wrong() {
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+        let input = b"both";
+
+        let mut before = Machine::new(&image, input.to_vec(), Limits::default()).unwrap();
+        for _ in 0..5 {
+            let _ = before.step().unwrap();
+        }
+        let agreed = before.commit().root();
+        let witness = witness_at(&image, input, Step::new(5));
+
+        let verdict = Verdict {
+            divergence: Step::new(5),
+            agreed_root: Some(agreed),
+            first_claim: Some([7; 32]),
+            second_claim: Some([9; 32]),
+            rounds: 1,
+        };
+
+        match adjudicate(&image, &verdict, &witness, input, Limits::default()).unwrap() {
+            Judgment::BothWrong { actual } => assert!(actual.is_some()),
+            other => panic!("expected both wrong, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn every_adjudication_error_renders_a_message() {
+        let samples = [
+            AdjudicationError::WitnessDoesNotMatchAgreedState,
+            AdjudicationError::UnusableWitness(crate::engine::machine::WitnessError::NoFrames),
+            AdjudicationError::ExecutionFailed(Trap::Unreachable),
+            AdjudicationError::NoAgreedState,
+        ];
+        for sample in samples {
+            assert!(
+                !sample.to_string().is_empty(),
+                "empty message for {sample:?}"
             );
         }
     }

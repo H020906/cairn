@@ -83,9 +83,12 @@ Final:    coordinator executes instruction i alone, on the instrumented interpre
           and learns which worker lied.
 ```
 
-The coordinator's work is **one instruction**, not N. Total cost is `O(log N)` messages
-and `O(1)` compute. This is the same skeleton as an optimistic rollup's fraud proof,
-applied to scientific computation instead of financial state.
+The coordinator's work is **one instruction**, not N: `O(log N)` messages, and compute that
+does not grow with the length of the disputed execution. It can execute that instruction
+without replaying anything because the parties supply a **state witness** — the small parts of
+the machine whole, and memory as only the pages that instruction touches, each with a Merkle
+proof binding it to the state root bisection established. This is the same skeleton as an
+optimistic rollup's fraud proof, applied to scientific computation instead of financial state.
 
 ### 2.4 Why this is the whole project
 

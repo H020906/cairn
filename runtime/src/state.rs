@@ -57,6 +57,9 @@ const DOMAIN_LABELS: u8 = 0x06;
 /// Domain separator for the call stack as a whole.
 const DOMAIN_CALL_STACK: u8 = 0x07;
 
+/// Domain separator for the dropped-segment bitmaps.
+const DOMAIN_SEGMENTS: u8 = 0x08;
+
 /// A WebAssembly numeric value, as it appears on the operand stack, in a local, or in a global.
 ///
 /// Reference types are absent by construction: [`crate::validate`] rejects any module that
@@ -234,6 +237,27 @@ pub fn hash_frames(frames: &[FrameDigest]) -> Hash {
     *hasher.finalize().as_bytes()
 }
 
+/// Commit to which data and element segments have been dropped.
+///
+/// `data.drop` and `elem.drop` change what a later `memory.init` or `table.init` copies, so two
+/// executions differing only in which segments they have dropped are genuinely different
+/// states. Without this they would commit to the same root, and a divergence in that part
+/// would be invisible to arbitration.
+#[must_use]
+pub fn hash_segments(dropped_data: &[bool], dropped_elements: &[bool]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_SEGMENTS]);
+    hasher.update(&(dropped_data.len() as u64).to_le_bytes());
+    for dropped in dropped_data {
+        hasher.update(&[u8::from(*dropped)]);
+    }
+    hasher.update(&(dropped_elements.len() as u64).to_le_bytes());
+    for dropped in dropped_elements {
+        hasher.update(&[u8::from(*dropped)]);
+    }
+    *hasher.finalize().as_bytes()
+}
+
 /// Where execution has reached: an instruction within a function.
 ///
 /// Both indices refer to the *instrumented* module, which is the only module any worker ever
@@ -280,6 +304,8 @@ pub struct StateCommitment {
     /// A hash covering the call stack: per frame, its function, its return position, its
     /// locals and its operand-stack base.
     pub call_stack: Hash,
+    /// [`hash_segments`] over the dropped data and element segments.
+    pub segments: Hash,
     /// The instruction about to execute.
     pub program_counter: ProgramCounter,
     /// Instructions retired so far. This is the coordinate bisection searches over.
@@ -299,6 +325,7 @@ impl StateCommitment {
         hasher.update(&self.globals);
         hasher.update(&self.operand_stack);
         hasher.update(&self.call_stack);
+        hasher.update(&self.segments);
         hasher.update(&self.program_counter.encode());
         hasher.update(&self.fuel.get().to_le_bytes());
         *hasher.finalize().as_bytes()
@@ -318,6 +345,7 @@ mod tests {
             globals: hash_values(&[Value::I32(1)]),
             operand_stack: hash_values(&[Value::I64(2)]),
             call_stack: hash_values(&[Value::I32(3)]),
+            segments: hash_segments(&[false], &[]),
             program_counter: ProgramCounter {
                 function: 7,
                 instruction: 11,
@@ -352,6 +380,12 @@ mod tests {
         let mut c = commitment();
         c.call_stack = hash_values(&[Value::I32(99)]);
         assert_ne!(c.root(), base, "call stack");
+
+        // `data.drop` changes what a later `memory.init` copies, so two executions differing
+        // only in which segments they have dropped really are different states.
+        let mut seg = commitment();
+        seg.segments = hash_segments(&[true], &[]);
+        assert_ne!(seg.root(), base, "dropped segments");
 
         let mut pc = commitment();
         pc.program_counter.instruction += 1;
@@ -448,6 +482,7 @@ mod tests {
             globals: [0; 32],
             operand_stack: [0; 32],
             call_stack: [0; 32],
+            segments: [0; 32],
             program_counter: ProgramCounter::default(),
             fuel: Fuel::ZERO,
         };

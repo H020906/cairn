@@ -60,7 +60,9 @@ they binary-search their commitments down to **the single machine instruction wh
 executions first diverged**, and the coordinator re-executes that one instruction to find
 out who lied.
 
-Checking one instruction instead of a billion. `O(log n)` messages, `O(1)` compute.
+Checking one instruction instead of a billion. `O(log n)` messages, and work that does not
+grow with how long the disputed job ran — arbitrating a trillion-instruction unit costs what
+arbitrating a thousand-instruction one costs.
 
 The mechanism is borrowed from optimistic rollups and pointed at science instead of
 finance. The full design, including why bit-exact determinism is a hard requirement and

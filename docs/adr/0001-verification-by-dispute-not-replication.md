@@ -72,6 +72,25 @@ Adjudication   coordinator executes instruction i alone, on the instrumented
 Coordinator cost is **one instruction and `O(log N)` messages**, regardless of whether the
 unit ran for a million instructions or a trillion.
 
+The coordinator can execute that instruction without replaying anything because the parties
+hand it a **state witness**: the small parts of the machine whole — globals, both stacks,
+locals, the counters — and memory as only the pages that one instruction touches, each with a
+Merkle proof binding it to the state root bisection already established. Rebuilding a
+commitment from the witness and finding it equal to that root is what proves the witness was
+not fabricated; nothing else needs checking, because the commitment covers every part of the
+state.
+
+An earlier draft of this ADR described that cost as `O(1)` compute. That overstates it. A
+witness grows with the module's declared stack depth, local count and the number of pages one
+instruction can reach — `memory.fill` can span a dozen. The claim that is both true and the
+one the argument actually needs is narrower:
+
+> **The coordinator's work is independent of the length of the disputed execution.**
+
+Arbitrating a unit that ran for a trillion instructions costs what arbitrating one that ran
+for a thousand costs. That is what makes cheating unprofitable at any scale, and it does not
+require the stronger `O(1)` reading.
+
 ### 4. A worker that abandons a dispute loses it
 
 Volunteers disconnect; that is normal, not adversarial. If a party fails to answer a

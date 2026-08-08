@@ -56,6 +56,15 @@ pub enum Trap {
     CallStackExhausted,
     /// The work unit ran out of fuel.
     OutOfFuel,
+    /// A machine rebuilt from a witness touched a memory page the witness did not carry.
+    ///
+    /// Only reachable during adjudication. It means the party that supplied the witness
+    /// omitted a page the disputed instruction needs, so the witness is unusable — which is
+    /// that party's failure, not a fact about the computation.
+    WitnessIncomplete {
+        /// The page index that was missing.
+        page: u32,
+    },
     /// The operand stack did not hold what an instruction required.
     ///
     /// Unreachable for a validated module; retained because the interpreter must not assume
@@ -87,6 +96,9 @@ impl core::fmt::Display for Trap {
             Self::SignatureMismatch => write!(f, "indirect call type mismatch"),
             Self::CallStackExhausted => write!(f, "call stack exhausted"),
             Self::OutOfFuel => write!(f, "out of fuel"),
+            Self::WitnessIncomplete { page } => {
+                write!(f, "witness does not carry memory page {page}")
+            }
             Self::StackUnderflow => write!(f, "operand stack underflow"),
             Self::TypeMismatch => write!(f, "operand type mismatch"),
             Self::Unsupported { operator } => {

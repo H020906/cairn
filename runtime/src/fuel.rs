@@ -186,6 +186,23 @@ impl FuelMeter {
         })
     }
 
+    /// Resume a meter partway through an execution.
+    ///
+    /// Used by dispute adjudication, which rebuilds a machine at the disputed instruction
+    /// rather than running up to it. The snapshot schedule is advanced to wherever it would
+    /// have been at that point, so a resumed meter behaves exactly like one that got there the
+    /// long way.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ConfigError::IntervalTooLarge`] on the same terms as [`FuelMeter::new`].
+    pub fn restore(consumed: Fuel, limit: u64, interval_log2: u8) -> Result<Self, ConfigError> {
+        let mut meter = Self::new(limit, interval_log2)?;
+        meter.consumed = consumed.0;
+        meter.advance_threshold_past(consumed.0);
+        Ok(meter)
+    }
+
     /// Instructions retired so far.
     #[must_use]
     pub const fn consumed(&self) -> Fuel {
