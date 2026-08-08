@@ -302,6 +302,150 @@ pub fn verify(root: &Hash, index: usize, page: &[u8], proof: &[Hash]) -> bool {
     &running == root
 }
 
+/// A memory commitment reconstructed from proofs rather than from the pages themselves.
+///
+/// # What this is for
+///
+/// Dispute adjudication hands a referee a handful of pages, proofs binding them to a memory
+/// root both parties agreed on, and one instruction to execute. If that instruction writes to
+/// memory, the referee has to produce the *new* root — without ever holding the megabytes it
+/// did not receive.
+///
+/// For a single page that is easy: walk its proof upward, substituting the new leaf. For
+/// several it is not, because their paths share ancestors, and updating each one independently
+/// against its own now-stale proof gives a wrong answer. `memory.fill` can touch a dozen pages
+/// in one instruction, so this is a case that arises rather than a hypothetical.
+///
+/// A `PartialTree` holds every node the proofs revealed and recomputes shared ancestors once,
+/// in the right order.
+///
+/// # Refusing to guess
+///
+/// [`PartialTree::root`] returns `None` when the supplied proofs do not determine the root.
+/// A structure like this must never return a plausible hash it could not actually derive: a
+/// wrong root would convict whichever party's claim failed to match it.
+#[derive(Debug, Clone)]
+pub struct PartialTree {
+    /// Leaf count, a power of two. Matches the [`PageTree`] the proofs came from.
+    capacity: usize,
+    /// Known nodes, in the same heap layout [`PageTree`] uses: root at 1, children of `i` at
+    /// `2i` and `2i + 1`, leaf `p` at `capacity + p`.
+    nodes: std::collections::BTreeMap<usize, Hash>,
+    /// Leaves written since the last [`root`](Self::root).
+    dirty: BTreeSet<usize>,
+}
+
+impl PartialTree {
+    /// An empty reconstruction of a tree with `pages` logical pages.
+    ///
+    /// `pages` must match what the original [`PageTree`] was built with, or the proofs will
+    /// not line up.
+    #[must_use]
+    pub fn new(pages: usize) -> Self {
+        Self {
+            capacity: pages.next_power_of_two().max(2),
+            nodes: std::collections::BTreeMap::new(),
+            dirty: BTreeSet::new(),
+        }
+    }
+
+    /// Add a page and the sibling hashes its proof revealed.
+    ///
+    /// Proofs drawn from the same tree agree about every node they share, so adding several is
+    /// consistent by construction. Callers should still check each one with [`verify`] against
+    /// the agreed root first — this method takes the proof's word for it.
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::OutOfRange`] if the index is past the tree, [`PageError::WrongSize`] if the
+    /// page is not [`PAGE_SIZE`] bytes.
+    pub fn insert(&mut self, index: usize, page: &[u8], proof: &[Hash]) -> Result<(), PageError> {
+        if index >= self.capacity {
+            return Err(PageError::OutOfRange {
+                index,
+                pages: self.capacity,
+            });
+        }
+        if page.len() != PAGE_SIZE {
+            return Err(PageError::WrongSize { got: page.len() });
+        }
+
+        let mut node = self.capacity + index;
+        self.nodes.insert(node, hash_leaf(page));
+
+        for sibling in proof {
+            if node <= 1 {
+                break;
+            }
+            self.nodes.insert(node ^ 1, *sibling);
+            node /= 2;
+        }
+        self.dirty.insert(self.capacity + index);
+        Ok(())
+    }
+
+    /// Replace the contents of a page already added by [`insert`](Self::insert).
+    ///
+    /// # Errors
+    ///
+    /// [`PageError::OutOfRange`] if the page was never supplied — a referee cannot write to
+    /// memory it was not given, and silently accepting would produce a root derived from
+    /// zeroes the party never committed to.
+    pub fn set_page(&mut self, index: usize, page: &[u8]) -> Result<(), PageError> {
+        if page.len() != PAGE_SIZE {
+            return Err(PageError::WrongSize { got: page.len() });
+        }
+        let leaf = self.capacity + index;
+        if index >= self.capacity || !self.nodes.contains_key(&leaf) {
+            return Err(PageError::OutOfRange {
+                index,
+                pages: self.capacity,
+            });
+        }
+        self.nodes.insert(leaf, hash_leaf(page));
+        self.dirty.insert(leaf);
+        Ok(())
+    }
+
+    /// The root, or `None` if the supplied proofs do not determine it.
+    pub fn root(&mut self) -> Option<Hash> {
+        self.recompute();
+        self.nodes.get(&1).copied()
+    }
+
+    /// Rebuild every ancestor of a dirty leaf, level by level.
+    fn recompute(&mut self) {
+        if self.dirty.is_empty() {
+            return;
+        }
+        let mut level: BTreeSet<usize> = self.dirty.iter().map(|leaf| leaf / 2).collect();
+        self.dirty.clear();
+
+        while !level.is_empty() {
+            let mut parents = BTreeSet::new();
+            for &node in &level {
+                if node == 0 {
+                    continue;
+                }
+                // A node whose children are not both known cannot be derived, and is left
+                // absent rather than guessed. Its absence propagates to the root.
+                let (Some(left), Some(right)) =
+                    (self.nodes.get(&(node * 2)), self.nodes.get(&(node * 2 + 1)))
+                else {
+                    self.nodes.remove(&node);
+                    continue;
+                };
+                let hash = hash_node(left, right);
+                self.nodes.insert(node, hash);
+                if node > 1 {
+                    parents.insert(node / 2);
+                }
+            }
+            level = parents;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -476,6 +620,174 @@ mod tests {
             Err(PageError::WrongSize { got: 128 })
         );
         assert!(tree.proof(4).is_none());
+    }
+
+    // --- reconstruction from proofs ----------------------------------------------------
+
+    /// A full tree with distinguishable contents in every page.
+    fn populated(pages: usize) -> PageTree {
+        let mut tree = PageTree::new(pages);
+        for i in 0..pages {
+            tree.set_page(i, &page(i as u8, 0x5A)).unwrap();
+        }
+        tree
+    }
+
+    #[test]
+    fn a_reconstruction_reproduces_the_root_it_came_from() {
+        let mut full = populated(16);
+        let root = full.root();
+
+        let mut partial = PartialTree::new(16);
+        for i in [3usize, 9] {
+            let contents = page(i as u8, 0x5A);
+            let proof = full.proof(i).unwrap();
+            assert!(
+                verify(&root, i, &contents, &proof),
+                "proof {i} should verify"
+            );
+            partial.insert(i, &contents, &proof).unwrap();
+        }
+
+        assert_eq!(partial.root(), Some(root));
+    }
+
+    #[test]
+    fn writing_one_page_tracks_the_real_tree() {
+        let mut full = populated(16);
+        let root = full.root();
+
+        let mut partial = PartialTree::new(16);
+        let proof = full.proof(5).unwrap();
+        partial.insert(5, &page(5, 0x5A), &proof).unwrap();
+
+        let updated = page(0xEE, 0xFF);
+        partial.set_page(5, &updated).unwrap();
+        full.set_page(5, &updated).unwrap();
+
+        assert_ne!(partial.root(), Some(root), "the write must move the root");
+        assert_eq!(partial.root(), Some(full.root()));
+    }
+
+    #[test]
+    fn writing_several_pages_at_once_tracks_the_real_tree() {
+        // The case a single proof cannot handle. These paths share ancestors, so updating each
+        // page against its own now-stale proof would produce a wrong root. One instruction can
+        // reach this: `memory.fill` touches every page it spans.
+        let mut full = populated(16);
+        let root = full.root();
+
+        let mut partial = PartialTree::new(16);
+        let touched = [4usize, 5, 6, 7];
+        for i in touched {
+            let proof = full.proof(i).unwrap();
+            partial.insert(i, &page(i as u8, 0x5A), &proof).unwrap();
+        }
+        assert_eq!(partial.root(), Some(root), "before any write");
+
+        for i in touched {
+            let filled = vec![0xAB; PAGE_SIZE];
+            partial.set_page(i, &filled).unwrap();
+            full.set_page(i, &filled).unwrap();
+        }
+
+        assert_eq!(partial.root(), Some(full.root()));
+    }
+
+    #[test]
+    fn adjacent_pages_sharing_a_parent_reconstruct() {
+        // Leaves 6 and 7 are siblings: 7's proof contains 6's *old* hash, and 6's contains
+        // 7's. Naive insertion order could clobber a freshly written leaf with a stale
+        // sibling value.
+        let mut full = populated(8);
+
+        let mut partial = PartialTree::new(8);
+        for i in [6usize, 7] {
+            let proof = full.proof(i).unwrap();
+            partial.insert(i, &page(i as u8, 0x5A), &proof).unwrap();
+        }
+        assert_eq!(partial.root(), Some(full.root()));
+
+        let a = page(0x11, 0x22);
+        let b = page(0x33, 0x44);
+        partial.set_page(6, &a).unwrap();
+        partial.set_page(7, &b).unwrap();
+        full.set_page(6, &a).unwrap();
+        full.set_page(7, &b).unwrap();
+
+        assert_eq!(partial.root(), Some(full.root()));
+    }
+
+    #[test]
+    fn an_incomplete_reconstruction_refuses_to_guess() {
+        // The property that matters most here. Without enough proofs the root is unknowable,
+        // and returning a plausible-looking hash would convict whichever party's claim failed
+        // to match it.
+        let mut partial = PartialTree::new(16);
+        assert_eq!(partial.root(), None, "nothing supplied at all");
+
+        // A leaf with no proof determines nothing above itself.
+        partial.insert(0, &page(0, 0x5A), &[]).unwrap();
+        assert_eq!(partial.root(), None, "a leaf without its siblings");
+    }
+
+    #[test]
+    fn a_truncated_proof_does_not_yield_a_root() {
+        let mut full = populated(16);
+        let proof = full.proof(2).unwrap();
+        let short = &proof[..proof.len() - 1];
+
+        let mut partial = PartialTree::new(16);
+        partial.insert(2, &page(2, 0x5A), short).unwrap();
+        assert_eq!(
+            partial.root(),
+            None,
+            "a proof missing its top sibling cannot reach the root"
+        );
+    }
+
+    #[test]
+    fn writing_a_page_that_was_never_supplied_is_refused() {
+        // A referee must not be able to write to memory it was not given: the resulting root
+        // would be derived from zeroes no party ever committed to.
+        let mut full = populated(16);
+        let proof = full.proof(1).unwrap();
+
+        let mut partial = PartialTree::new(16);
+        partial.insert(1, &page(1, 0x5A), &proof).unwrap();
+
+        assert_eq!(
+            partial.set_page(2, &vec![0u8; PAGE_SIZE]),
+            Err(PageError::OutOfRange {
+                index: 2,
+                pages: 16
+            })
+        );
+    }
+
+    #[test]
+    fn reconstruction_rejects_malformed_input() {
+        let mut partial = PartialTree::new(8);
+        assert_eq!(
+            partial.insert(8, &vec![0u8; PAGE_SIZE], &[]),
+            Err(PageError::OutOfRange { index: 8, pages: 8 })
+        );
+        assert_eq!(
+            partial.insert(0, &[0u8; 16], &[]),
+            Err(PageError::WrongSize { got: 16 })
+        );
+    }
+
+    #[test]
+    fn a_single_page_memory_reconstructs() {
+        // Capacity is floored at two, so a one-page memory still has a genuine internal root.
+        let mut full = PageTree::new(1);
+        full.set_page(0, &page(7, 8)).unwrap();
+        let proof = full.proof(0).unwrap();
+
+        let mut partial = PartialTree::new(1);
+        partial.insert(0, &page(7, 8), &proof).unwrap();
+        assert_eq!(partial.root(), Some(full.root()));
     }
 
     #[test]
