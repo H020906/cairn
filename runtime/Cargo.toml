@@ -17,4 +17,5 @@ wasmparser = { version = "0.255", default-features = false, features = ["validat
 workspace = true
 
 [dev-dependencies]
+wasmi = "1.1"
 wat = "1.255.0"

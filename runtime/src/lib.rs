@@ -39,13 +39,13 @@
 //!   protocol speaks: a snapshot is a state root, bisection compares two of them, and
 //!   arbitration checks that one instruction moves one to the other.
 //!
-//! Still to land:
-//!
-//! - `engine` — the two execution paths. `fast` hands the instrumented module to the host
+//! - [`engine`] — the two execution paths. `fast` hands the instrumented module to the host
 //!   engine and snapshots at `2^k` boundaries; `slow` is a fully instrumented interpreter
-//!   able to execute a single instruction in isolation from a committed state.
+//!   able to execute a single instruction in isolation from a committed state. Currently
+//!   holds [`engine::image`], the decoder both paths share.
 
 pub mod canon;
+pub mod engine;
 pub mod fuel;
 pub mod merkle;
 pub mod state;
