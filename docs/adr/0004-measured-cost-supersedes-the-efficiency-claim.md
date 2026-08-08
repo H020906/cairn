@@ -1,8 +1,26 @@
 # ADR-0004 — What verification actually costs, and what that does to ADR-0001
 
-- **Status:** Accepted
+- **Status:** Accepted, **with its per-workload figures and its recommendation corrected below**
 - **Date:** 2026-08-08
 - **Supersedes:** the cost analysis in [ADR-0001](0001-verification-by-dispute-not-replication.md) §"Expected cost". The rest of ADR-0001 stands.
+- **Corrected in part by:** [ADR-0005](0005-the-fast-path-cannot-snapshot.md)
+
+> **Two corrections, both worth reading before the figures below.**
+>
+> **1. The ±10% error bar in this ADR was wrong, and the harness now measures its own error
+> instead of asserting one.** Two configurations that instrument to *byte-identical modules*
+> were timing up to 148% apart on the integer-loop workload. The cause was structural: all
+> samples of one configuration were timed before moving to the next, so CPU frequency drift sat
+> inside the comparison. The benchmark now interleaves and rotates the variants, rebuilds each
+> image per round, and prints a **noise floor** taken from byte-identical pairs. Three workloads
+> now calibrate to ±2%; the integer loop does not calibrate at all on this machine and its
+> wall-clock figures are withdrawn — its instruction counts, which are exact, stand.
+>
+> **2. The remediation recommended at the end of this ADR is withdrawn.** Metering no longer
+> runs on the honest path at all — see ADR-0005 — so its cost applies only to disputed units.
+>
+> The central finding of this ADR is unaffected: **`s` was assumed at ≈5% and is nothing like
+> 5%.** ADR-0001's cost argument remains refuted.
 
 ## Context
 

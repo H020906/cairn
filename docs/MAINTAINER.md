@@ -2,7 +2,7 @@
 
 *A note for whoever picks this up. Written by the person who put it down.*
 
-Last updated: 2026-08-08, at commit `0847d2c`.
+Last updated: 2026-08-08, at commit `78cba4e` + the ADR-0005 change.
 
 ---
 
@@ -70,9 +70,11 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
 - **No browser worker, no native worker, no dashboard.** `worker-browser/`,
   `worker-native/`, `web/` — none of them exist.
 - **No real workload.** The molecular-docking target is an intention.
-- **No fast path.** The "fast path" is described everywhere as the browser's native WASM
-  engine taking periodic snapshots. It has not been written. Every measurement in this
-  repository is on the *slow* interpreter.
+- **No fast path.** It has not been written, and every measurement in this repository is on
+  the *slow* interpreter. Note that what it has to do got **smaller**: under
+  [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) it runs a determinism-instrumented
+  module and returns a result, rather than producing a trace commitment — which it could not
+  have done in any case.
 
 `CONTRIBUTING.md` lists JDK, Node and Docker as setup requirements. Today you need Rust and
 nothing else.
@@ -170,13 +172,37 @@ slow path; on a browser JIT the metering term would likely get *worse* and the
 canonicalization term much *better*. It is neither an upper nor a lower bound. It is the
 only number that exists.
 
-**The single highest-value open task follows directly from this.** In the integer-loop
-workload, instruction count rose 1.27× while time rose 3.16×. The cost is not how many
-instructions the pass adds — it is *which* one: a call to `cairn.charge`. Replacing it with a
-global counter plus a threshold test turns the common path from a call into three arithmetic
-instructions. If that lands and the overhead drops, ADR-0001's conclusion may be recoverable.
-If it lands and the overhead does not drop, that is also worth knowing, and it should be
-written down.
+### What happened next, and it matters more than the numbers
+
+Two things, recorded in [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md).
+
+**The fast path could not have worked.** A `StateCommitment` covers seven things; a stock
+WebAssembly engine lets its embedder see two of them. The operand stack, a live frame's
+locals, the frame chain and the program counter are simply not exposed — not by V8, not by
+wasmtime, not by `wasmi`, and not by any engine that compiles WebAssembly to machine code.
+So a volunteer could never have committed to their own execution the way ADR-0001 said.
+
+The fix is to stop asking them to. A volunteer returns **the result**; if two results
+disagree, both parties re-execute under full instrumentation and *then* the bisection game
+runs. Determinism — already a hard requirement — is what makes the re-execution the same
+execution. That moved metering and snapshots off the honest path entirely, and honest-path
+overhead is now indistinguishable from zero on three of four workloads.
+
+**The benchmark's error bar was fiction.** ADR-0004 claimed ±10%. The harness was timing all
+samples of one configuration before starting the next, so CPU frequency drift sat inside every
+comparison: two configurations compiling to *byte-identical modules* measured up to 148%
+apart. It now interleaves, rotates, rebuilds each image per round, and — the part worth
+keeping — **measures its own error from byte-identical pairs and refuses to print any figure
+smaller than it.** Three workloads calibrate to ±2%. The integer loop does not calibrate at
+all on this machine, and its wall-clock numbers are withdrawn rather than footnoted.
+
+**What is left is a different problem from the one this project started with.** Not
+"verification is expensive" — that cost is off the common path. It is **"bit-exact floating
+point is expensive"**: NaN canonicalization costs 2.30× in instructions and about +150% in
+time, and it cannot be deferred to dispute time because it is what makes two honest workers
+agree at all. Most float operations in a numeric kernel cannot produce a NaN from non-NaN
+inputs; proving that statically would delete the check rather than optimise it. **That is the
+highest-value open problem in the repository.**
 
 ---
 
@@ -191,13 +217,13 @@ the change than getting the invariants in §5 into your hands rather than your n
 
 **A week.** Pick one of two, not both:
 
-- *Make it fast* — the global fuel counter from §6. Small diff, real measurement, directly
-  attacks the one claim that failed. Highest value per line in the repository.
-- *Make it real* — the fast path. Take a host WASM engine (`wasmtime` for a native
-  prototype, the browser's own for the eventual worker), run the same instrumented bytes,
-  take snapshots at the same step boundaries, and check the roots match the interpreter's on
-  every differential case. Until this exists, Cairn has one engine and the entire premise —
-  execute fast, arbitrate slow — is unexercised.
+- *Make floating point cheap* — §6. Prove statically that an operation cannot produce a NaN
+  and delete its canonicalization. This is now the only large cost Cairn has, and it is a
+  self-contained analysis problem over `canon.rs`. Highest value in the repository.
+- *Make it real* — the fast path, as ADR-0005 redefines it: a host WASM engine (`wasmtime`
+  natively, the browser's own eventually) running the determinism-only module and returning a
+  result, plus the dispute-time re-execution path that produces the trace. Until this exists,
+  Cairn has one engine and the premise — execute fast, arbitrate slow — is unexercised.
 
 The second is the bigger hole. The first is the better first week.
 

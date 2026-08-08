@@ -47,11 +47,27 @@ struct Outcome {
 
 /// Assemble, validate and instrument, exactly as a coordinator would.
 fn canonical(text: &str) -> Vec<u8> {
+    canonical_with(text, Config::default())
+}
+
+/// The same, under a chosen instrumentation configuration.
+fn canonical_with(text: &str, config: Config) -> Vec<u8> {
     let source = wat::parse_str(text).expect("module should assemble");
     validate::validate_submitted(&source, validate::Limits::default())
         .expect("module should be a valid Cairn workload");
-    canon::instrument(&source, Config::default()).expect("instrumentation should succeed")
+    canon::instrument(&source, config).expect("instrumentation should succeed")
 }
+
+/// What a volunteer runs on the fast path: determinism enforced, nothing else.
+///
+/// Metering and snapshots are absent because the fast path cannot use them — see
+/// [ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md). This variant therefore
+/// has to produce the same answer as the fully instrumented one, or a dispute would be
+/// arbitrating a different execution from the one whose result was submitted.
+const DETERMINISM_ONLY: Config = Config {
+    meter_fuel: false,
+    canonicalize_nan: true,
+};
 
 /// Run under Cairn's interpreter.
 fn run_cairn(module: &[u8], input: &[u8]) -> Outcome {
@@ -195,6 +211,42 @@ fn assert_agree(name: &str, text: &str, input: &[u8]) {
         "{name}: fuel differs, so the two engines did not execute the same instructions",
     );
     assert_eq!(mine.output, reference.output, "{name}: output differs");
+
+    assert_instrumentation_is_transparent(name, text, input, &mine);
+}
+
+/// Assert that adding metering does not change what a workload computes.
+///
+/// Cairn's honest path runs the determinism-only module and returns just a result; a trace is
+/// produced later, by re-executing the *metered* module, only if someone disputes that result
+/// ([ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md)). The whole scheme rests
+/// on those two modules being the same program: if metering could change an answer or turn a
+/// completed run into a trap, arbitration would settle a dispute about an execution that never
+/// happened, and it would do so against an honest worker.
+///
+/// Fuel is deliberately not compared — the determinism-only module has no `charge` calls to
+/// count, which is the entire point of running it.
+#[track_caller]
+fn assert_instrumentation_is_transparent(name: &str, text: &str, input: &[u8], metered: &Outcome) {
+    let module = canonical_with(text, DETERMINISM_ONLY);
+    let plain = run_cairn(&module, input);
+
+    assert_eq!(
+        plain.output.is_some(),
+        metered.output.is_some(),
+        "{name}: metering changed whether execution trapped",
+    );
+    assert_eq!(
+        plain.output, metered.output,
+        "{name}: metering changed the result",
+    );
+
+    // And under the independent engine, since the fast path is not ours.
+    let reference = run_wasmi(&module, input);
+    assert_eq!(
+        reference.output, metered.output,
+        "{name}: the reference engine disagrees on the determinism-only module",
+    );
 }
 
 /// Wrap an expression in a workload that writes its `i64` value out.

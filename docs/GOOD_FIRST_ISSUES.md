@@ -66,8 +66,12 @@ reproducible**.
 Split them. The exact ones can be regression-gated in CI; the noisy ones cannot.
 
 **Done when:** `cargo bench` emits the deterministic metrics to a separate committed file, CI
-fails if they change unexpectedly, and wall-clock stays advisory with its noise caveat
-attached.
+fails if they change unexpectedly, and wall-clock stays advisory.
+
+**Half of this is already done and is worth reading first.** The benchmark now measures its
+own error rather than asserting one — it times pairs of configurations that instrument to
+byte-identical modules, and prints any figure smaller than that error as *not resolved*. On
+one workload the error is 148%. What is missing is the CI gate on the exact counts.
 
 ---
 
@@ -113,43 +117,55 @@ than examples.
 
 ---
 
-### 8 · Make metering cheap — the highest-value change in the repository · **L** · `help-wanted`
+### 8 · Don't canonicalize NaNs that cannot happen — the highest-value change in the repository · **L** · `help-wanted`
 
-`canon.rs` charges fuel by injecting a call to the host function `cairn.charge` at every
-basic block. Measurement says that is the dominant cost: in the integer-loop workload the
-*instruction count* rose only 1.27× while *time* rose 3.16×. The problem is not how many
-instructions the pass adds — it is that the added one is a call across the host boundary.
+After [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) moved metering and snapshots off
+the honest path, Cairn has exactly one large cost left, and this is it. NaN canonicalization
+costs **2.30× in instructions and about +150% in time** on the float benchmark, and unlike
+metering it *cannot* be deferred to dispute time: it is what makes two honest workers agree.
 
-Replace it with a module-local global counter plus a threshold test: three arithmetic
-instructions on the common path, host call only when a snapshot is actually due.
+But most of it is unnecessary. `f64.add` on two operands that are known not to be NaN and not
+to be an infinity-minus-infinity case cannot produce a NaN, so the check after it is dead
+work. A dataflow analysis over the function — tracking "cannot be NaN" through constants,
+loads of known-clean values, comparisons and arithmetic — would let `canon.rs` skip the
+injection entirely at those sites.
 
-**Why it matters:** this is the change that could recover ADR-0001's conclusion. Overhead is
-currently 13%–201% against an assumed 5%, which is what put Cairn between 1.26× and 3.14×
-versus replication's 2.0×.
-**Careful:** the counter is now part of the machine state, so it must be in the commitment,
-and a submitted module must not be able to touch it — see the `cairn.charge` reservation rule
-in [MAINTAINER.md](MAINTAINER.md) §5.
-**Done when:** `cargo bench` shows the new numbers, the differential gate is still green, and
-ADR-0004 gains a follow-up section reporting the result **whether or not it improved**.
+**Why it matters:** this is the difference between Cairn beating replication on the workloads
+it exists to serve and not. Current figures: ≈1.1× where the honest path has no float
+arithmetic, ≈2.6× where it does, against replication's 2.0×.
+**Careful:** being wrong here is not a performance bug, it is a consensus bug — a skipped
+canonicalization that *was* needed makes two honest workers disagree, and the protocol then
+convicts one of them. Be conservative: when the analysis is unsure, canonicalize. The
+differential gate must stay green, and a new test should pin at least one case where the
+analysis *declines* to skip.
+**Done when:** `cargo bench` shows the float kernel's instruction ratio below 2.30×, the
+differential gate is green, and a short ADR records which operations the analysis can clear
+and why that is sound.
 
 ---
 
 ### 9 · Build the fast path · **L** · `help-wanted`
 
-Everything in this repository describes two execution paths: a fast one (the host's native
-WASM engine, taking periodic snapshots) and a slow one (our interpreter, used only for
-arbitration). **Only the slow one exists.** Every measurement here is on the interpreter, and
-the premise — execute fast, arbitrate slow — is currently unexercised.
+Everything in this repository describes two execution paths: a fast one (the host's own WASM
+engine) and a slow one (our interpreter, used only for arbitration). **Only the slow one
+exists.** Every measurement here is on the interpreter, and the premise — execute fast,
+arbitrate slow — is currently unexercised.
 
-**Start:** `wasmtime` as a native stand-in for the browser engine. Run the *same instrumented
-bytes*, take snapshots at the same step boundaries, and assert the roots equal the
-interpreter's across the whole differential corpus.
-**Why it matters most:** the fast path cannot be reached into — that is the entire reason
-determinism is baked into the binary by `canon.rs` rather than enforced by the engine. That
-design decision is untested until a second engine runs the same bytes and agrees.
-**Done when:** two independent engines produce identical trace commitments for every module
-in the corpus, and any disagreement is minimised and filed — a real disagreement here is the
-most important bug report this project could receive.
+Note that [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) made this job *smaller* than
+it used to be. The fast path does not produce a trace — it cannot, and that is the finding
+that ADR is about. It runs the **determinism-only** module and returns a result. Trace
+production is a separate, dispute-time path that runs the fully instrumented module.
+
+**Start:** `wasmtime` as a native stand-in for the browser engine. Run the determinism-only
+module across the whole differential corpus and assert the results match the interpreter's.
+Then add the dispute-time path: same unit, fully instrumented module, trace commitment
+compared against the interpreter's.
+**Why it matters most:** determinism is baked into the binary by `canon.rs` rather than
+enforced at runtime precisely so that an engine nobody controls can be trusted with it. That
+design decision is untested until a second engine runs those bytes and agrees.
+**Done when:** two independent engines agree on results for every module in the corpus and on
+trace commitments for the instrumented variant, and any disagreement is minimised and filed —
+a real disagreement here is the most important bug report this project could receive.
 
 ---
 

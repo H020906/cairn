@@ -1,16 +1,27 @@
 # ADR-0001 — Verify by dispute, not by replication
 
-- **Status:** Accepted, **except for the cost analysis below, which was measured and refuted**
+- **Status:** Accepted, **except for the cost analysis and the execution model below, both of which were refuted**
 - **Date:** 2026-08-07
 - **Supersedes:** none
-- **Superseded in part by:** [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md)
+- **Superseded in part by:** [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md), [ADR-0005](0005-the-fast-path-cannot-snapshot.md)
 
-> **The "Expected cost" section of this ADR is wrong.** It assumed instrumentation overhead of
-> ≈5%; measurement found 13%–201% depending on the workload, which makes Cairn *more*
-> expensive than replication for some shapes rather than cheaper. See ADR-0004 for the figures
-> and for what could change them. The mechanism described here — bisection to a single
-> instruction, arbitration independent of execution length — measured exactly as designed and
-> stands.
+> **Two parts of this ADR are wrong.**
+>
+> **The "Expected cost" section.** It assumed instrumentation overhead of ≈5%; measurement
+> found nothing like that. See [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md).
+>
+> **§1, "Every result carries a commitment to its own execution".** It cannot. A stock
+> WebAssembly engine does not expose the operand stack, the locals of a live frame, the frame
+> chain, or the program counter to its embedder — four of the seven fields a Cairn state
+> commitment contains. The worker now returns the **result alone**, and a trace is produced by
+> re-execution only if that result is disputed. See
+> [ADR-0005](0005-the-fast-path-cannot-snapshot.md), which also records what that buys: on
+> three of four benchmark workloads the honest path's overhead becomes indistinguishable from
+> zero.
+>
+> **The mechanism this ADR exists to describe is unaffected** — bisection to a single
+> instruction, adjudication from a state witness, cost independent of execution length. That
+> measured exactly as designed and stands.
 
 ## Context
 

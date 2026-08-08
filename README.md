@@ -41,28 +41,26 @@ Cairn attacks both.
 The first is engineering: the worker compiles to WebAssembly and runs in a browser tab.
 Opening a page is the entire onboarding flow.
 
-The second is the reason this project exists — and the part where the honest answer is
-currently *partly*. The verification mechanism works and is cheap to arbitrate. Its
-instrumentation overhead is not yet low enough to beat replication on every workload. Both
-halves of that are measured, and the numbers are below.
+The second is the reason this project exists. The verification mechanism works, is cheap to
+arbitrate, and — after a design correction described below — costs the honest volunteer
+essentially nothing on most workloads. Floating point is the exception, and it is the
+project's open problem.
 
 ## The idea
 
 **Verification and re-execution are not the same thing.**
 
-When a volunteer finishes a job, they return the answer *and a cryptographic commitment to
-how they got there* — a Merkle root over snapshots of machine state taken every few
-thousand instructions. Instrumenting a program to produce that costs 13%–201% depending on
-the workload, which is far more than the design assumed and is discussed honestly below.
-
-Most jobs are then accepted after a **single** execution. Confidence comes from decoy jobs
+A volunteer runs the job once and returns the answer. Nothing else — no proof, no trace.
+Most jobs are accepted after that **single** execution. Confidence comes from decoy jobs
 whose answers we already know, silently mixed into the stream, plus a reputation score
 built from how workers handle them.
 
-When two workers *do* disagree, we never re-run the job. Instead they play a bisection game:
-they binary-search their commitments down to **the single machine instruction where their
-executions first diverged**, and the coordinator re-executes that one instruction to find
-out who lied.
+When two workers *do* return different answers, nobody re-runs the job to see who was right.
+Instead, each is asked to show their working: they re-execute under instrumentation and
+return a cryptographic commitment to how their execution went. Then they play a bisection
+game — binary-searching those commitments down to **the single machine instruction where
+their executions first diverged** — and the coordinator executes that one instruction to
+find out who lied.
 
 Checking one instruction instead of a billion. `O(log n)` messages, and work that does not
 grow with how long the disputed job ran — arbitrating a trillion-instruction unit costs what
@@ -80,12 +78,22 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 |---|---|
 | Arbitration cost is independent of execution length | **Confirmed.** 21k steps → 15 rounds; 2.1M steps → 21 rounds |
 | A witness is small | **Confirmed.** One 64 KiB page worst case over 20,000 sampled instructions |
-| Instrumentation overhead is ≈5% | **Refuted.** 13%–201%, workload-dependent |
-| Cairn beats replication on cost | **Not established.** 1.26×–3.14× against replication's ≈2.0× — better for some workloads, worse for others |
+| Metering does not change what a program computes | **Confirmed.** Every differential case, both engines, identical output and trapping |
+| Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
+| A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |
+| Cairn beats replication on cost | **Partly.** ≈1.1× where the honest path carries no float arithmetic; ≈2.6× where it does, against replication's ≈2.0× |
 
-The original cost argument is withdrawn and replaced with the measurements in
-[ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md), which also names
-the one optimisation most likely to change the answer.
+That last row is the whole current state of the project in one line. Two things got there:
+measurement refuted the original cost claim
+([ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md)), and then the
+execution model underneath it turned out to be unbuildable, so it was replaced
+([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)) — which removed the verification
+cost from the honest path but left the cost of making floating point bit-exact.
+
+**The benchmark also measures its own error rather than asserting one**, by timing pairs of
+configurations that compile to byte-identical modules. On one workload that error came out at
+148%, so that workload's timings are printed as *not resolved* instead of as results. An
+earlier version of this benchmark would have reported them.
 
 ## Stack
 

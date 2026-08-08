@@ -43,12 +43,13 @@ nothing on the honest path and makes the liar pay on the rare dishonest one.
 
 ```mermaid
 flowchart TD
-    A["Work unit: WebAssembly module + input"] --> B["Volunteer executes it once,<br/>at full speed, on the host's own engine"]
-    B --> C["Returns the result AND a Merkle root over<br/>machine-state snapshots every 2^k instructions"]
-    C --> D{"Is there a second<br/>commitment for this unit?"}
+    A["Work unit: WebAssembly module + input"] --> B["Volunteer executes it once, at full speed,<br/>on the host's own engine.<br/>Determinism instrumentation only — no metering"]
+    B --> C["Returns the result. Nothing else."]
+    C --> D{"Is there a second<br/>result for this unit?"}
     D -->|"No — the common case"| E["Accepted after a single execution"]
     D -->|"Yes, and it matches"| E
-    D -->|"Yes, and it differs"| F["Bisection game:<br/>log2 n rounds between the two workers"]
+    D -->|"Yes, and it differs"| T["Both parties re-execute under full<br/>instrumentation and return trace commitments"]
+    T --> F["Bisection game:<br/>log2 n rounds between the two workers"]
     F --> G["Disagreement narrowed to<br/>one machine instruction"]
     G --> H["Coordinator executes that one instruction<br/>from a state witness — nothing is replayed"]
     H --> I["The party whose state transition<br/>was wrong is identified"]
@@ -58,17 +59,26 @@ flowchart TD
 ### 2.1 The fast path
 
 A work unit is a deterministic WebAssembly program plus its input. A volunteer executes it
-**once**, at full speed, on the browser's own native WASM engine. Alongside the result,
-the worker returns a **commitment to how it got there**: a Merkle root over snapshots of
-machine state taken every `2^k` instructions.
+**once**, at full speed, on the browser's own native WASM engine, and returns the **result**.
+That is all. No trace, no commitment, no snapshots.
+
+That is a deliberate reversal of the original design, which had the worker return a Merkle
+root over periodic state snapshots alongside the result. It cannot: a stock WebAssembly engine
+does not let its embedder see the operand stack, a live frame's locals, the frame chain, or
+the program counter — four of the seven fields a Cairn state commitment covers. The full
+argument, and what the reversal costs and buys, is
+[ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md).
+
+The fast path still runs an *instrumented* module, just not a metered one: NaN canonicalization
+and the validated feature set are what make two honest workers agree at all, and they cannot be
+deferred. Measured, that leaves honest-path overhead **indistinguishable from zero on three of
+four benchmark workloads** — and around +150% on floating point, which is now the project's
+main cost problem.
 
 ```
-result  = f(input)
-commit  = merkle_root([ state@0, state@2^k, state@2·2^k, ... , state@end ])
+volunteer returns:   result = f(input)
+on dispute only:     commit = merkle_root([ state@0, state@2^k, ... , state@end ])
 ```
-
-Producing that commitment costs a snapshot every few thousand instructions — single-digit
-percent overhead, not a second full execution.
 
 ### 2.2 Deciding what to trust
 
@@ -85,8 +95,11 @@ instead of from redundancy:
 
 ### 2.3 The dispute game
 
-When two workers return different commitments for the same unit, Cairn does **not** re-run
-the job. The two workers play an interactive bisection game, refereed by the coordinator:
+When two workers return different **results** for the same unit, each is asked to produce a
+trace: they re-execute the unit under the fully instrumented module and return a Merkle root
+over its snapshots. Because execution is deterministic, that re-execution *is* the original
+one. From there the two workers play an interactive bisection game, refereed by the
+coordinator, and the coordinator still never re-runs the job itself:
 
 ```
 Round 1:  disagree over instructions [0, N)          → both reveal state@N/2
@@ -103,7 +116,7 @@ sequenceDiagram
     participant A as Worker A
     participant C as Coordinator
     participant B as Worker B
-    Note over A,B: Commitments differ somewhere in steps 0..N
+    Note over A,B: Results differ. Both re-execute under full<br/>instrumentation; their trace commitments differ in steps 0..N
     loop log2 N rounds
         C->>A: reveal your state at the midpoint of the disputed range
         C->>B: reveal your state at the midpoint of the disputed range
@@ -131,17 +144,23 @@ optimistic rollup's fraud proof, applied to scientific computation instead of fi
 Everything else here is competent but ordinary engineering. **This is the part that is
 genuinely hard and genuinely new for this domain.**
 
-What it does *not* yet do is beat replication on cost. That was the original argument, and
-measurement refuted it: instrumentation overhead was assumed at ≈5% and is 13%–201% depending
-on the workload, which leaves Cairn cheaper than replication for some shapes and more
-expensive for others — including floating point, the shape it exists to serve. The figures,
-the decomposition, and the one optimisation that could change them are in
-[ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md).
-
 What measured exactly as designed is the arbitration itself: dispute cost does not grow with
 execution length (a hundredfold longer execution costs six more rounds), and a witness is one
-64 KiB page in the worst case observed. The mechanism works; the price is not yet what it
-needs to be.
+64 KiB page in the worst case observed.
+
+The cost story has been rewritten twice by evidence, and both rewrites are in the ADRs rather
+than smoothed away. The original claim — beat replication because instrumentation costs ≈5% —
+was **refuted** by measurement ([ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md)).
+Then the execution model it assumed turned out to be unbuildable, and replacing it moved the
+instrumentation off the honest path entirely
+([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)). Where the benchmark can resolve
+it, honest-path overhead is now indistinguishable from zero — except on floating point, where
+NaN canonicalization costs about +150% and cannot be deferred, because it is what makes two
+honest workers agree at all.
+
+So: **the verification tax is gone from the common path; the determinism tax on floats is
+not.** That is a different problem from the one this project started with, and a more
+tractable one.
 
 ---
 
