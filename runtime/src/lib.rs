@@ -32,15 +32,17 @@
 //!   deliberately the same set the interpreter implements, so no module can be accepted that
 //!   we would later be unable to arbitrate.
 //!
-//! Still to land, in dependency order:
+//! - [`canon`] — the instrumentation pass that rewrites a submitted module into
+//!   Cairn-canonical form, so that both execution paths run the identical binary and have
+//!   nothing left to disagree about.
 //!
-//! - `canon` — the instrumentation pass that rewrites a submitted module into Cairn-canonical
-//!   form: NaN canonicalization, fuel metering, snapshot hooks, deterministic resource
-//!   ceilings.
+//! Still to land:
+//!
 //! - `engine` — the two execution paths. `fast` hands the instrumented module to the host
 //!   engine and snapshots at `2^k` boundaries; `slow` is a fully instrumented interpreter
 //!   able to execute a single instruction in isolation from a committed state.
 
+pub mod canon;
 pub mod fuel;
 pub mod merkle;
 pub mod validate;

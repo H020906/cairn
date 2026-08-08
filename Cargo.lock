@@ -45,6 +45,7 @@ name = "cairn-runtime"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "wasm-encoder",
  "wasmparser",
  "wat",
 ]
