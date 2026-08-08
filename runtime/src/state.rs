@@ -1,0 +1,368 @@
+//! The canonical representation of a machine state, and its commitment.
+//!
+//! This is the vocabulary the dispute protocol speaks. A snapshot is a
+//! [`StateCommitment::root`]; bisection compares two of them; arbitration re-executes one
+//! instruction and checks that the resulting root matches what a worker claimed. Both
+//! execution paths must agree on this encoding down to the byte, or every downstream
+//! guarantee is void.
+//!
+//! # Floating point is stored as bits, never as floats
+//!
+//! [`Value::F32`] and [`Value::F64`] hold raw bit patterns, not `f32`/`f64`. This is not a
+//! micro-optimisation; it is the only correct choice here, for two reasons.
+//!
+//! First, **NaN is not equal to itself.** A state containing a NaN would never compare equal
+//! to a copy of itself if floats were compared as floats, so a worker replaying its own
+//! execution would appear to diverge from itself.
+//!
+//! Second, **`+0.0` and `-0.0` compare equal but are different states.** A program can
+//! distinguish them — `1.0 / 0.0` is `+inf` while `1.0 / -0.0` is `-inf` — so two states
+//! differing only in the sign of a zero really are different states and must commit to
+//! different roots.
+//!
+//! Comparing bits gets both cases right for free. The `float_cmp` lint is denied across this
+//! crate to keep it that way.
+//!
+//! # What a commitment covers
+//!
+//! ```text
+//! root = H( domain ‖ memory_root ‖ globals ‖ operand_stack ‖ call_stack ‖ pc ‖ fuel )
+//! ```
+//!
+//! The memory root comes from [`crate::merkle::PageTree`], so it is cheap to maintain
+//! incrementally and supports single-page proofs during arbitration. The other components are
+//! small enough to hash outright.
+
+use crate::fuel::Fuel;
+use crate::merkle::Hash;
+
+/// Domain separator for a whole-state commitment.
+///
+/// `0x00` and `0x01` belong to [`crate::merkle`]'s leaf and node hashes; every domain byte in
+/// this crate is distinct so that no hash of one kind can be presented as a hash of another.
+const DOMAIN_STATE: u8 = 0x02;
+
+/// Domain separator for a hashed sequence of values.
+const DOMAIN_VALUES: u8 = 0x03;
+
+/// A WebAssembly numeric value, as it appears on the operand stack, in a local, or in a global.
+///
+/// Reference types are absent by construction: [`crate::validate`] rejects any module that
+/// could produce one, precisely because a host reference has no host-independent encoding and
+/// so could never appear in a commitment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Value {
+    /// A 32-bit integer.
+    I32(i32),
+    /// A 64-bit integer.
+    I64(i64),
+    /// A 32-bit float, held as its raw bit pattern. See the module documentation.
+    F32(u32),
+    /// A 64-bit float, held as its raw bit pattern. See the module documentation.
+    F64(u64),
+}
+
+impl Value {
+    /// Tag byte identifying the value's type in the canonical encoding.
+    const fn tag(self) -> u8 {
+        match self {
+            Self::I32(_) => 0x00,
+            Self::I64(_) => 0x01,
+            Self::F32(_) => 0x02,
+            Self::F64(_) => 0x03,
+        }
+    }
+
+    /// The payload, widened to 64 bits without interpretation.
+    const fn payload(self) -> u64 {
+        match self {
+            Self::I32(v) => v as u32 as u64,
+            Self::I64(v) => v as u64,
+            Self::F32(bits) => bits as u64,
+            Self::F64(bits) => bits,
+        }
+    }
+
+    /// The canonical nine-byte encoding: one tag byte then the payload, little-endian.
+    ///
+    /// Fixed width keeps a sequence of values unambiguous without per-element framing.
+    #[must_use]
+    pub const fn encode(self) -> [u8; 9] {
+        let payload = self.payload().to_le_bytes();
+        [
+            self.tag(),
+            payload[0],
+            payload[1],
+            payload[2],
+            payload[3],
+            payload[4],
+            payload[5],
+            payload[6],
+            payload[7],
+        ]
+    }
+
+    /// Interpret an `f32` as a value, keeping its exact bits.
+    #[must_use]
+    pub fn from_f32(value: f32) -> Self {
+        Self::F32(value.to_bits())
+    }
+
+    /// Interpret an `f64` as a value, keeping its exact bits.
+    #[must_use]
+    pub fn from_f64(value: f64) -> Self {
+        Self::F64(value.to_bits())
+    }
+}
+
+/// Commit to a sequence of values — an operand stack, a frame's locals, or the globals.
+///
+/// The length is hashed explicitly. Without it, `[a, b] ‖ [c]` and `[a] ‖ [b, c]` would
+/// produce the same bytes when two such sequences are combined, and a worker could shuffle
+/// values between the stack and its locals without changing the commitment.
+#[must_use]
+pub fn hash_values(values: &[Value]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_VALUES]);
+    hasher.update(&(values.len() as u64).to_le_bytes());
+    for value in values {
+        hasher.update(&value.encode());
+    }
+    *hasher.finalize().as_bytes()
+}
+
+/// Where execution has reached: an instruction within a function.
+///
+/// Both indices refer to the *instrumented* module, which is the only module any worker ever
+/// runs. Instruction indices are positions in the function's operator sequence, so they are
+/// stable across machines in a way byte offsets would not be.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct ProgramCounter {
+    /// Index of the executing function in the instrumented module.
+    pub function: u32,
+    /// Index of the next instruction to execute within that function.
+    pub instruction: u32,
+}
+
+impl ProgramCounter {
+    /// The canonical eight-byte encoding.
+    #[must_use]
+    pub const fn encode(self) -> [u8; 8] {
+        let f = self.function.to_le_bytes();
+        let i = self.instruction.to_le_bytes();
+        [f[0], f[1], f[2], f[3], i[0], i[1], i[2], i[3]]
+    }
+}
+
+impl core::fmt::Display for ProgramCounter {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "func {}:{}", self.function, self.instruction)
+    }
+}
+
+/// The parts of a machine state, each already reduced to a hash.
+///
+/// An engine assembles this from its own structures; nothing here assumes how an interpreter
+/// stores its stack or its frames, only how it must summarise them. That seam is deliberate —
+/// the fast path and the slow path have very different internals and must still produce
+/// identical roots.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StateCommitment {
+    /// Root of the linear-memory page tree.
+    pub memory: Hash,
+    /// [`hash_values`] over the module's globals, in index order.
+    pub globals: Hash,
+    /// [`hash_values`] over the operand stack, bottom to top.
+    pub operand_stack: Hash,
+    /// A hash covering the call stack: per frame, its function, its return position, its
+    /// locals and its operand-stack base.
+    pub call_stack: Hash,
+    /// The instruction about to execute.
+    pub program_counter: ProgramCounter,
+    /// Instructions retired so far. This is the coordinate bisection searches over.
+    pub fuel: Fuel,
+}
+
+impl StateCommitment {
+    /// The single hash that identifies this state.
+    ///
+    /// Every component is fixed-width, so the concatenation is unambiguous without length
+    /// prefixes at this level.
+    #[must_use]
+    pub fn root(&self) -> Hash {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(&[DOMAIN_STATE]);
+        hasher.update(&self.memory);
+        hasher.update(&self.globals);
+        hasher.update(&self.operand_stack);
+        hasher.update(&self.call_stack);
+        hasher.update(&self.program_counter.encode());
+        hasher.update(&self.fuel.get().to_le_bytes());
+        *hasher.finalize().as_bytes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::*;
+    use crate::merkle::PageTree;
+
+    fn commitment() -> StateCommitment {
+        StateCommitment {
+            memory: PageTree::new(4).root(),
+            globals: hash_values(&[Value::I32(1)]),
+            operand_stack: hash_values(&[Value::I64(2)]),
+            call_stack: hash_values(&[Value::I32(3)]),
+            program_counter: ProgramCounter {
+                function: 7,
+                instruction: 11,
+            },
+            fuel: Fuel::new(1234),
+        }
+    }
+
+    #[test]
+    fn a_commitment_is_a_function_of_its_parts() {
+        assert_eq!(commitment().root(), commitment().root());
+    }
+
+    #[test]
+    fn every_component_changes_the_root() {
+        // If any part of the state could change without moving the root, a worker could
+        // diverge in that part and still appear to agree.
+        let base = commitment().root();
+
+        let mut m = commitment();
+        m.memory = PageTree::new(8).root();
+        assert_ne!(m.root(), base, "memory");
+
+        let mut g = commitment();
+        g.globals = hash_values(&[Value::I32(99)]);
+        assert_ne!(g.root(), base, "globals");
+
+        let mut s = commitment();
+        s.operand_stack = hash_values(&[Value::I64(99)]);
+        assert_ne!(s.root(), base, "operand stack");
+
+        let mut c = commitment();
+        c.call_stack = hash_values(&[Value::I32(99)]);
+        assert_ne!(c.root(), base, "call stack");
+
+        let mut pc = commitment();
+        pc.program_counter.instruction += 1;
+        assert_ne!(pc.root(), base, "program counter");
+
+        let mut fu = commitment();
+        fu.fuel = Fuel::new(1235);
+        assert_ne!(fu.root(), base, "fuel");
+    }
+
+    #[test]
+    fn the_program_counter_distinguishes_function_from_instruction() {
+        // A naive encoding that summed or concatenated without fixed width could confuse
+        // (1, 2) with (2, 1).
+        let a = ProgramCounter {
+            function: 1,
+            instruction: 2,
+        };
+        let b = ProgramCounter {
+            function: 2,
+            instruction: 1,
+        };
+        assert_ne!(a.encode(), b.encode());
+    }
+
+    #[test]
+    fn nan_commits_equal_to_itself() {
+        // The reason floats are stored as bits. Compared as floats, NaN != NaN, and a worker
+        // replaying its own execution would appear to diverge from itself.
+        let nan = Value::from_f64(f64::NAN);
+        assert_eq!(nan, nan);
+        assert_eq!(hash_values(&[nan]), hash_values(&[nan]));
+    }
+
+    #[test]
+    fn distinct_nan_payloads_are_distinct_states() {
+        // Two NaNs the program constructed itself, with different payloads, are genuinely
+        // different memory contents. Canonicalization applies to arithmetic results, not to
+        // bits a program wrote deliberately.
+        let quiet = Value::F64(0x7ff8_0000_0000_0000);
+        let payload = Value::F64(0x7ff8_0000_dead_beef);
+        assert_ne!(hash_values(&[quiet]), hash_values(&[payload]));
+    }
+
+    #[test]
+    fn positive_and_negative_zero_are_distinct_states() {
+        // They compare equal as floats but a program can tell them apart: 1.0/0.0 is +inf
+        // and 1.0/-0.0 is -inf. Two states differing only here really are different.
+        let pos = Value::from_f64(0.0);
+        let neg = Value::from_f64(-0.0);
+        assert_ne!(pos, neg);
+        assert_ne!(hash_values(&[pos]), hash_values(&[neg]));
+    }
+
+    #[test]
+    fn types_are_distinguished_even_with_identical_payloads() {
+        // i32 0, i64 0, f32 +0.0 and f64 +0.0 all have an all-zero payload. Without the tag
+        // byte they would be indistinguishable, and a worker could substitute one for
+        // another.
+        let zeros = [Value::I32(0), Value::I64(0), Value::F32(0), Value::F64(0)];
+        for (i, a) in zeros.iter().enumerate() {
+            for b in zeros.iter().skip(i + 1) {
+                assert_ne!(a.encode(), b.encode(), "{a:?} vs {b:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn value_sequences_are_length_bound() {
+        // Without the length prefix, values could be moved between two hashed sequences —
+        // say from the operand stack into locals — without changing either hash.
+        assert_ne!(
+            hash_values(&[Value::I32(1), Value::I32(2)]),
+            hash_values(&[Value::I32(1)])
+        );
+        assert_ne!(hash_values(&[]), hash_values(&[Value::I32(0)]));
+    }
+
+    #[test]
+    fn order_matters() {
+        assert_ne!(
+            hash_values(&[Value::I32(1), Value::I32(2)]),
+            hash_values(&[Value::I32(2), Value::I32(1)])
+        );
+    }
+
+    #[test]
+    fn state_and_value_domains_do_not_collide() {
+        // A commitment root must never be presentable as a value-sequence hash. The domain
+        // bytes are what prevent it; this test fails if someone reuses one.
+        let empty_values = hash_values(&[]);
+        let state = StateCommitment {
+            memory: [0; 32],
+            globals: [0; 32],
+            operand_stack: [0; 32],
+            call_stack: [0; 32],
+            program_counter: ProgramCounter::default(),
+            fuel: Fuel::ZERO,
+        };
+        assert_ne!(state.root(), empty_values);
+    }
+
+    #[test]
+    fn i32_payloads_are_sign_preserving_and_distinct() {
+        // -1 widens to 0xffff_ffff, not to 0xffff_ffff_ffff_ffff, so it must not collide with
+        // an i64 of -1 once the tag is accounted for.
+        assert_eq!(
+            Value::I32(-1).encode(),
+            [0x00, 0xff, 0xff, 0xff, 0xff, 0x00, 0x00, 0x00, 0x00]
+        );
+        assert_eq!(
+            Value::I64(-1).encode(),
+            [0x01, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+        );
+        assert_ne!(Value::I32(-1).encode(), Value::I64(-1).encode());
+    }
+}

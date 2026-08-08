@@ -35,6 +35,9 @@
 //! - [`canon`] — the instrumentation pass that rewrites a submitted module into
 //!   Cairn-canonical form, so that both execution paths run the identical binary and have
 //!   nothing left to disagree about.
+//! - [`state`] — the canonical machine state and its commitment. The vocabulary the dispute
+//!   protocol speaks: a snapshot is a state root, bisection compares two of them, and
+//!   arbitration checks that one instruction moves one to the other.
 //!
 //! Still to land:
 //!
@@ -45,4 +48,5 @@
 pub mod canon;
 pub mod fuel;
 pub mod merkle;
+pub mod state;
 pub mod validate;
