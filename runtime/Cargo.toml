@@ -19,3 +19,11 @@ workspace = true
 [dev-dependencies]
 wasmi = "1.1"
 wat = "1.255.0"
+
+# No criterion. What this benchmark most needs to report is exact instruction counts and
+# ratios between configurations, not confidence intervals on absolute times, and a bench
+# harness would add a heavy dependency and minutes of runtime for statistics that do not
+# change the conclusion.
+[[bench]]
+name = "cost"
+harness = false

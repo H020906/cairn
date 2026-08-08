@@ -850,17 +850,49 @@ mod tests {
     }
 
     #[test]
-    fn canonicalization_scratch_locals_are_visible_to_the_interpreter() {
-        // The pass appends one f32 and one f64 scratch local to every function. The
-        // interpreter has to allocate them, so they must survive decoding.
-        let module = canonical(
-            r#"(module (memory (export "memory") 1 1)
-                 (func (export "cairn_run") (result f64) (f64.sqrt (f64.const 2))))"#,
-            Config::default(),
+    fn canonicalization_allocates_scratch_locals_only_where_they_are_used() {
+        // The pass gives a function a scratch slot per float width it actually canonicalizes,
+        // and none otherwise. This is not tidiness: every slot is allocated on every call, so
+        // giving them to functions that do not need them costs most exactly where it is least
+        // visible — deep recursion. Benchmarking caught a 2.76x slowdown on a purely integer
+        // workload that gained no canonicalization instructions at all.
+        let scratch_of = |body: &str| {
+            let module = canonical(
+                &format!(
+                    r#"(module (memory (export "memory") 1 1)
+                         (func (export "cairn_run") {body}))"#
+                ),
+                Config::default(),
+            );
+            let image = decode(&module).unwrap();
+            image.function(image.entry).unwrap().local_types.clone()
+        };
+
+        assert_eq!(
+            scratch_of("(result f64) (f64.sqrt (f64.const 2))"),
+            vec![ValType::F64],
+            "an f64-only function needs one f64 slot"
         );
-        let image = decode(&module).unwrap();
-        let f = image.function(image.entry).unwrap();
-        assert_eq!(f.local_types, vec![ValType::F32, ValType::F64]);
+        assert_eq!(
+            scratch_of("(result f32) (f32.sqrt (f32.const 2))"),
+            vec![ValType::F32],
+            "an f32-only function needs one f32 slot"
+        );
+        assert_eq!(
+            scratch_of("(result f64) (f64.add (f64.promote_f32 (f32.mul (f32.const 1) (f32.const 2))) (f64.const 1))"),
+            vec![ValType::F32, ValType::F64],
+            "a function using both widths needs both"
+        );
+        assert_eq!(
+            scratch_of("(result i32) (i32.add (i32.const 1) (i32.const 2))"),
+            Vec::<ValType>::new(),
+            "an integer-only function gets no scratch at all"
+        );
+        assert_eq!(
+            scratch_of("(result f64) (f64.abs (f64.const -2))"),
+            Vec::<ValType>::new(),
+            "abs is bit-exact, so it is not canonicalized and needs no scratch"
+        );
     }
 
     #[test]

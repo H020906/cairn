@@ -1,8 +1,16 @@
 # ADR-0001 — Verify by dispute, not by replication
 
-- **Status:** Accepted
+- **Status:** Accepted, **except for the cost analysis below, which was measured and refuted**
 - **Date:** 2026-08-07
 - **Supersedes:** none
+- **Superseded in part by:** [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md)
+
+> **The "Expected cost" section of this ADR is wrong.** It assumed instrumentation overhead of
+> ≈5%; measurement found 13%–201% depending on the workload, which makes Cairn *more*
+> expensive than replication for some shapes rather than cheaper. See ADR-0004 for the figures
+> and for what could change them. The mechanism described here — bisection to a single
+> instruction, arbitration independent of execution length — measured exactly as designed and
+> stands.
 
 ## Context
 
@@ -112,9 +120,12 @@ Steady-state cost per unit of useful science:
 With plausible values (`s` ≈ 0.05, `c` ≈ 0.03, `r` ≈ 0.10) that is ≈ **1.18×** against
 ≈ **2.00×** — roughly 1.7× more science from the same donated hardware.
 
-**These are design targets, not measured results.** Establishing the real curve — error
-rate as a function of `c`, `r`, and adversary fraction — is a deliverable of this project,
-not an assumption of it. See the benchmark task in the roadmap.
+**These were design targets, and measurement refuted them.** `s` was assumed at ≈0.05 and is
+actually 0.13–2.01 depending on workload shape, which puts Cairn between 1.26× and 3.14× —
+better than replication for some workloads and worse for others. The figures, the
+decomposition, and the one optimisation that could change them are in
+[ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md). **Do not quote the 1.18×
+above.**
 
 ## Consequences
 

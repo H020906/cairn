@@ -36,12 +36,15 @@ because the RAM is failing or the CPU is overclocked. The classic defence is to 
 job to two or three machines and compare. It works, and it throws away a third to a half of
 all the power people donated.
 
-Cairn fixes both.
+Cairn attacks both.
 
 The first is engineering: the worker compiles to WebAssembly and runs in a browser tab.
 Opening a page is the entire onboarding flow.
 
-The second is the reason this project exists.
+The second is the reason this project exists — and the part where the honest answer is
+currently *partly*. The verification mechanism works and is cheap to arbitrate. Its
+instrumentation overhead is not yet low enough to beat replication on every workload. Both
+halves of that are measured, and the numbers are below.
 
 ## The idea
 
@@ -49,7 +52,8 @@ The second is the reason this project exists.
 
 When a volunteer finishes a job, they return the answer *and a cryptographic commitment to
 how they got there* — a Merkle root over snapshots of machine state taken every few
-thousand instructions. That costs a few percent, not a second full run.
+thousand instructions. Taking those snapshots costs 1%–25% depending on the workload, rather
+than a second full run.
 
 Most jobs are then accepted after a **single** execution. Confidence comes from decoy jobs
 whose answers we already know, silently mixed into the stream, plus a reputation score
@@ -67,6 +71,21 @@ arbitrating a thousand-instruction one costs.
 The mechanism is borrowed from optimistic rollups and pointed at science instead of
 finance. The full design, including why bit-exact determinism is a hard requirement and
 what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
+
+## What is measured
+
+`cargo bench` regenerates [docs/benchmarks.md](docs/benchmarks.md). The short version:
+
+| Claim | Status |
+|---|---|
+| Arbitration cost is independent of execution length | **Confirmed.** 21k steps → 15 rounds; 2.1M steps → 21 rounds |
+| A witness is small | **Confirmed.** One 64 KiB page worst case over 20,000 sampled instructions |
+| Instrumentation overhead is ≈5% | **Refuted.** 13%–201%, workload-dependent |
+| Cairn beats replication on cost | **Not established.** 1.26×–3.14× against replication's ≈2.0× — better for some workloads, worse for others |
+
+The original cost argument is withdrawn and replaced with the measurements in
+[ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md), which also names
+the one optimisation most likely to change the answer.
 
 ## Stack
 

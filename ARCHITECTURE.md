@@ -93,8 +93,19 @@ optimistic rollup's fraud proof, applied to scientific computation instead of fi
 ### 2.4 Why this is the whole project
 
 Everything else here is competent but ordinary engineering. **This is the part that is
-genuinely hard and genuinely new for this domain**, and it is what would let a volunteer
-grid deliver substantially more science per donated watt than the 2002 design does.
+genuinely hard and genuinely new for this domain.**
+
+What it does *not* yet do is beat replication on cost. That was the original argument, and
+measurement refuted it: instrumentation overhead was assumed at ≈5% and is 13%–201% depending
+on the workload, which leaves Cairn cheaper than replication for some shapes and more
+expensive for others — including floating point, the shape it exists to serve. The figures,
+the decomposition, and the one optimisation that could change them are in
+[ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md).
+
+What measured exactly as designed is the arbitration itself: dispute cost does not grow with
+execution length (a hundredfold longer execution costs six more rounds), and a witness is one
+64 KiB page in the worst case observed. The mechanism works; the price is not yet what it
+needs to be.
 
 ---
 
