@@ -59,9 +59,12 @@ Every other row is about payload bits. `copysign(x, y)` takes the *sign* of `y`,
 of a computed NaN is as unspecified as its payload. `copysign(1.0, sqrt(-1.0))` could be
 `+1.0` on one engine and `-1.0` on another, with no NaN in the answer at all.
 
-This is not hypothetical. Both engines available here return `0xfff8_0000_0000_0000` from
-`sqrt` of a negative number — a canonical NaN **with the sign bit set**. Canonicalizing the top
-operand before `copysign` clears that bit and fixes the result.
+This is not hypothetical, and it is not merely argued. Both engines here return
+`0xfff8_0000_0000_0000` from `sqrt` of a negative number — a canonical NaN **with the sign bit
+set**. And deleting this one entry from the escape set makes the randomised differential fail
+on its third case with **`-1.5` against `+1.5`**: no NaN anywhere in the answer, just a sign
+flipped by reading the sign bit of a NaN two engines disagreed about. Canonicalizing the top
+operand clears that bit and fixes the result.
 
 ### `Everywhere` canonicalizes at escapes too
 

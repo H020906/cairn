@@ -95,7 +95,7 @@ nothing else.
 | 8 | `runtime/src/engine/numeric.rs` | 1293 | Every numeric instruction, as pure stack transformations |
 | 9 | `runtime/src/engine/machine.rs` | 1987 | The interpreter, snapshots, witnesses |
 | 10 | `runtime/src/dispute.rs` | 1148 | Bisection protocol + adjudication |
-| 11 | `runtime/tests/differential.rs` | 529 | Cairn's interpreter vs `wasmi`, same bytes, must agree |
+| 11 | `runtime/tests/differential.rs` | ~1100 | Cairn's interpreter vs `wasmi` **and `wasmtime`**, same bytes, must agree — plus a seeded float-expression generator |
 | 12 | `runtime/benches/cost.rs` | 436 | What verification costs |
 
 Then the four ADRs in [docs/adr/](adr/), in numerical order. ADR-0001 is the thesis;
@@ -140,10 +140,14 @@ becomes invisible to the protocol.
 metering hook `canon.rs` injects; a module that could call it could forge its own
 instruction count.
 
-**7. The differential gate is not advisory.** It runs in CI, it compares Cairn's interpreter
-against `wasmi` on identical instrumented bytes, and it contains a deliberately-divergent
-case so the harness cannot pass vacuously. If you touch `canon.rs` or either engine and this
-goes red, the engines disagree, which is the single largest technical risk in the project.
+**7. The differential gate is not advisory.** It runs in CI and compares Cairn's interpreter
+against **two** independent engines on identical instrumented bytes: `wasmi`, which interprets,
+and `wasmtime`, which compiles through Cranelift. The second is there because a compiler can go
+wrong in ways an interpreter cannot — folding a float expression, contracting a multiply-add,
+reassociating arithmetic — and those are precisely the transformations that break bit-exact
+agreement. It contains a deliberately-divergent case so the harness cannot pass vacuously, and
+300 randomly generated float expressions per run from fixed seeds. If this goes red, engines
+disagree, which is the single largest technical risk in the project.
 
 ---
 
@@ -206,10 +210,19 @@ truncation — either yields a NaN or yields the same answer for every payload. 
 path canonicalizes at those four sites and nowhere else. The float kernel's instruction count
 went from 2.30× bare to **1.00×**.
 
-**Where that leaves the project: ADR-0001's conclusion holds, at 1.12×–1.15× against
+**Where that leaves the project: ADR-0001's conclusion holds, at ≈1.11×–1.14× against
 replication's 2.00×, on all four workload shapes.** Note carefully that this is not the
 original claim being vindicated. ADR-0001 assumed a ≈5% overhead on a path that cannot exist.
 The number came back because the honest path now does almost nothing.
+
+**And then the numbers were checked on a real compiler ([ADR-0007](adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)),
+which is the part to internalise before trusting any figure here.** Under wasmtime the honest
+path costs **0%** — cleaner confirmation than the interpreter could give, because the
+interpreter is slow enough to absorb small overheads. But fuel metering, which the interpreter
+prices at 18%–41%, costs **five to six times** on the compiler: a host call is cheap next to
+interpreted arithmetic and expensive next to compiled arithmetic. That only affects disputed
+units, and it revived a fix ADR-0005 had withdrawn. **The engine you measure on is part of the
+measurement** — most of `docs/benchmarks.md` is the interpreter, and it says so per section.
 
 **The thing to be careful about here is `canon::escape_site`.** A missing entry is not a
 performance regression — it makes two honest workers disagree and the protocol convicts one of

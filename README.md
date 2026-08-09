@@ -81,8 +81,10 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | Metering does not change what a program computes | **Confirmed.** Every differential case, both engines, identical output and trapping |
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
 | A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |
-| A NaN payload cannot change an answer | **Confirmed**, adversarially. And the test was checked for teeth: deleting one escape site makes two tests fail |
-| Cairn beats replication on cost | **Yes, currently.** ≈1.12×–1.15× against replication's ≈2.0×, on all four workload shapes |
+| A NaN payload cannot change an answer | **Confirmed** across three engines, including a JIT, on 300 randomly generated float expressions. Checked for teeth: deleting one escape site makes it fail |
+| The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
+| Cairn beats replication on cost | **Yes, currently.** ≈1.11×–1.14× against replication's ≈2.0×, on all four workload shapes |
+| Arbitrating a dispute is cheap for the parties | **No.** Full instrumentation costs ≈5–6× on a compiler. It runs once, on one unit, only when challenged — but it is not free |
 
 That last row took three reversals to get to, and none of them are hidden:
 
@@ -100,6 +102,14 @@ That last row took three reversals to get to, and none of them are hidden:
 **ADR-0001's conclusion is therefore right, and its reasoning is still wrong.** The number came
 back because the honest path now does almost nothing, not because the original 5% estimate was
 correct. Both facts are in the ADRs.
+
+A fourth reversal followed immediately, and it cuts the other way. Every figure above came from
+Cairn's interpreter. Running the same workloads on **wasmtime**, a real optimising compiler,
+confirms the honest path is free — and shows that fuel metering, which is now dispute-only,
+costs **five to six times** there against 18%–41% in the interpreter
+([ADR-0007](docs/adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)). A host
+call is cheap next to interpreted arithmetic and expensive next to compiled arithmetic. **The
+engine you measure on is part of the measurement.**
 
 **The benchmark measures its own error rather than asserting one**, by timing pairs of
 configurations that compile to byte-identical modules. When that error exceeds the effect, the

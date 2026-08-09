@@ -4,7 +4,7 @@
 
 **Instruction counts are exact, reproducible, and machine-independent. Wall-clock figures are not**, and this document measures how much they are not rather than asserting an error bar — see *Noise floor*. Any wall-clock figure smaller than its workload's noise is printed as *not resolved* instead of as a result.
 
-Times are the fastest of 15 interleaved runs on one machine, using Cairn's own interpreter — which is the **slow** path. The fast path in production is a JIT that does not exist yet; see [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) for what it can and cannot do.
+Times are the fastest of 15 interleaved runs on one machine. Unless a section says otherwise they use Cairn's own interpreter, which is the **slow** path — the one that only runs during arbitration. *On a JIT rather than the interpreter* measures the same things under wasmtime, and the two do not agree at all about what metering costs.
 
 ## Instruction count
 
@@ -23,10 +23,10 @@ Each column is the cost of adding one thing to the one before it. `s` in ADR-000
 
 | workload | bare | +metering | +snapshots | +canonicalization | **s** |
 |---|---:|---:|---:|---:|---:|
-| integer loop | 265.7ms | 1.25× | 1.02× | 1.00× | **+28%** |
-| float kernel | 99.5ms | 1.17× | 1.02× | 2.26× | **+170%** |
-| memory sweep | 66.2ms | 1.25× | 1.16× | 1.00× | **+45%** |
-| recursion | 198.0ms | 1.18× | 1.00× | 0.99× | **+17%** |
+| integer loop | 253.9ms | 1.27× | 0.99× | 1.01× | **+27%** |
+| float kernel | 97.1ms | 1.15× | 1.03× | 2.30× | **+173%** |
+| memory sweep | 64.2ms | 1.23× | 1.18× | 1.01× | **+47%** |
+| recursion | 196.4ms | 1.18× | 1.01× | 0.99× | **+17%** |
 
 The three middle columns are shown for decomposition only. Read them against the noise floor below before drawing anything from them — on at least one workload here the harness cannot tell these apart from nothing.
 
@@ -36,12 +36,25 @@ Measured, not assumed: these rows compare two configurations that produced ident
 
 | workload | identical bytes timed twice |
 |---|---:|
-| integer loop | +1.9% |
+| integer loop | -0.0% |
 | float kernel | — (canonicalization changes this module) |
-| memory sweep | -1.4% |
-| recursion | +1.0% |
+| memory sweep | +1.2% |
+| recursion | -0.0% |
 
-**Error bar: ±2%.**
+**Error bar: ±1%.**
+
+## On a JIT rather than the interpreter
+
+wasmtime, compiling through Cranelift. Compilation and instantiation are outside the timer; only the call to `cairn_run` is measured. This is the closest available look at what a volunteer's own engine would pay — every other figure in this document is the interpreter.
+
+| workload | honest path | full instrumentation |
+|---|---:|---:|
+| integer loop | -0% | +505% |
+| float kernel | -0% | +489% |
+| memory sweep | +0% | +162% |
+| recursion | +1% | +493% |
+
+The right-hand column runs only on a disputed unit. Note it against ADR-0004's guess that metering would cost *more* on a JIT than in the interpreter, because of the host-call boundary.
 
 ## The two paths, after ADR-0005
 
@@ -49,10 +62,10 @@ The fast path cannot snapshot, so it runs the determinism-only module and return
 
 | workload | honest path (ADR-0006) | honest, canonicalizing everywhere | disputed re-execution |
 |---|---:|---:|---:|
-| integer loop | **≈0% (±2%)** | ≈0% (±2%) | +28% |
-| float kernel | **-0%** | +148% | +170% |
-| memory sweep | **≈0% (±1%)** | ≈0% (±1%) | +45% |
-| recursion | **≈0% (±1%)** | ≈0% (±1%) | +17% |
+| integer loop | **≈0% (±0%)** | -0% | +27% |
+| float kernel | **-2%** | +156% | +173% |
+| memory sweep | **≈0% (±1%)** | ≈0% (±1%) | +47% |
+| recursion | **≈0% (±0%)** | +0% | +17% |
 
 The middle column is what the honest path cost before ADR-0006 narrowed canonicalization to the few operations that can actually leak a NaN payload. Exact instruction counts against bare, which is where that change is unambiguous: **integer loop 1.00×** (was 1.00×), **float kernel 1.00×** (was 2.30×), **memory sweep 1.00×** (was 1.00×), **recursion 1.00×** (was 1.00×).
 
@@ -71,12 +84,12 @@ Lower `k` means finer pre-committed brackets for bisection and more hashing. Thi
 
 | interval | snapshots | cost vs no snapshots |
 |---:|---:|---:|
-| 2^10 | 6144 | 3.24× |
-| 2^12 | 1536 | 1.68× |
-| 2^14 | 384 | 1.31× |
-| 2^16 | 96 | 1.18× |
-| 2^18 | 24 | 1.17× |
-| 2^20 | 6 | 1.10× |
+| 2^10 | 6144 | 3.26× |
+| 2^12 | 1536 | 1.69× |
+| 2^14 | 384 | 1.24× |
+| 2^16 | 96 | 1.16× |
+| 2^18 | 24 | 1.15× |
+| 2^20 | 6 | 1.12× |
 
 ## Dispute cost against execution length
 
@@ -102,14 +115,14 @@ An adjudicator's cost is set by this, not by the disputed execution's length. Pa
 
 ## Against ADR-0001
 
-`s` is the honest path's overhead, which after [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) is determinism instrumentation alone. It ranges from **-1%** to **+2%** across these four shapes. Full instrumentation, which now runs only on a disputed unit, costs up to +170%.
+`s` is the honest path's overhead, which after [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) is determinism instrumentation alone. It ranges from **-2%** to **+1%** across these four shapes. Full instrumentation, which now runs only on a disputed unit, costs up to +173%.
 
 | scheme | cost multiplier |
 |---|---:|
 | BOINC, N = 2 | 2.00× |
-| Cairn, best case | 1.12× |
-| Cairn, worst case | 1.15× |
+| Cairn, best case | 1.11× |
+| Cairn, worst case | 1.14× |
 
 Using the canary rate (0.03) and replication rate (0.1) ADR-0001 assumed. Those two are policy, not measurements — they are chosen, and choosing them differently moves these numbers.
 
-**Verdict: ADR-0001 holds** at these settings — worst case 1.15× against 2.00×.
+**Verdict: ADR-0001 holds** at these settings — worst case 1.14× against 2.00×.

@@ -41,7 +41,11 @@ jobs:
 
       - name: Build for the browser
         # The kernel has to compile to wasm32 or there is no zero-install worker.
-        run: cargo build --workspace --target wasm32-unknown-unknown --release
+        #
+        # `--lib` rather than `--workspace`: the reference engines are dev-dependencies, and
+        # wasmtime compiles WebAssembly to native code, so it will not itself compile *to*
+        # WebAssembly. Only the library has to.
+        run: cargo build -p cairn-runtime --lib --target wasm32-unknown-unknown --release
 
   determinism:
     name: Determinism gate
@@ -52,20 +56,24 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
 
-      - name: Cairn's interpreter vs an independent engine
-        # THIS GATE IS NOT ADVISORY. Dispute arbitration is sound only while two honest
-        # engines running the same instrumented module agree exactly. If they can diverge,
-        # arbitration does not catch cheats — it convicts whichever honest volunteer was
-        # running the engine that lost. See docs/adr/0003.
+      - name: Cairn's interpreter vs two independent engines
+        # THIS GATE IS NOT ADVISORY. Dispute arbitration is sound only while honest engines
+        # running the same instrumented module agree exactly. If they can diverge, arbitration
+        # does not catch cheats — it convicts whichever honest volunteer was running the engine
+        # that lost. See docs/adr/0003.
+        #
+        # Two references, deliberately of different kinds: wasmi interprets, wasmtime compiles
+        # through Cranelift. A compiler can go wrong in ways an interpreter cannot, and those
+        # are exactly the ways that break bit-exact agreement.
         run: cargo test --test differential -- --nocapture
 
       - name: Note the current limit of this gate
-        # Honest accounting: today the comparison runs over a hand-written corpus, which
-        # covers every instruction family but cannot find what nobody thought to write down.
-        # Random generation is the next step; until it lands, a green gate means "agrees on
-        # the cases we wrote", not "agrees".
+        # Honest accounting, kept accurate as coverage changes. Random generation now exists
+        # but is narrow: it produces float *expressions*, targeting canon::escape_site, whose
+        # failure mode is convicting an honest worker. Control flow, memory and module shape
+        # are still corpus-driven.
         run: |
-          echo "::notice title=Differential coverage::Corpus-driven, not yet randomised. A pass means the two engines agree on the written cases, not on all inputs."
+          echo "::notice title=Differential coverage::Three engines. Float expressions are randomly generated from fixed seeds; control flow, memory and module shape are still hand-written cases. A pass means agreement on those, not on all inputs."
 
   # Added as the modules land. Listed here so the intended shape of CI is visible from
   # the start rather than discovered later.

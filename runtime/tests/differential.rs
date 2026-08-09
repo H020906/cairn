@@ -1,4 +1,4 @@
-//! Differential testing: Cairn's interpreter against an independent WebAssembly engine.
+//! Differential testing: Cairn's interpreter against two independent WebAssembly engines.
 //!
 //! # Why this file is the most important test in the project
 //!
@@ -9,9 +9,27 @@
 //!
 //! That failure would be silent, rare, and concentrated on unusual hardware, which is the
 //! worst combination a bug can have. So the interpreter is not tested only against expected
-//! answers written by the same person who wrote it. It is tested against
-//! [`wasmi`](https://docs.rs/wasmi), a mature engine developed independently, on the same
-//! bytes.
+//! answers written by the same person who wrote it. It is tested against two mature engines
+//! developed independently, on the same bytes.
+//!
+//! # Why two references, and why of different kinds
+//!
+//! [`wasmi`](https://docs.rs/wasmi) interprets. [`wasmtime`](https://docs.rs/wasmtime) compiles
+//! through Cranelift. That difference is the point: a compiler can go wrong in ways an
+//! interpreter cannot — folding a float expression at compile time, contracting a multiply and
+//! an add, reassociating arithmetic — and those are exactly the transformations that would
+//! break a scheme resting on bit-exact agreement. Agreement between an interpreter and a JIT
+//! is far stronger evidence than agreement between two interpreters.
+//!
+//! wasmtime is also the nearest thing here to Cairn's fast path, which is a browser JIT and
+//! does not exist yet.
+//!
+//! # Where the cases come from
+//!
+//! Hand-written cases cover the divergences someone thought of. That is the wrong coverage
+//! model for `canon::escape_site`, whose failure mode is convicting an honest volunteer, so
+//! there is also a seeded generator producing random float expressions — see
+//! [`random_float_expressions_agree_across_engines`]. It has already earned its place.
 //!
 //! # What is compared
 //!
@@ -200,7 +218,109 @@ fn run_wasmi(module: &[u8], input: &[u8]) -> Outcome {
     }
 }
 
-/// Assert both engines agree, and say which axis differed if they do not.
+/// Run under wasmtime — a compiler, not an interpreter.
+///
+/// The second reference engine, and deliberately a different *kind* of engine. `wasmi`
+/// interprets; wasmtime lowers through Cranelift to machine code. Agreement between an
+/// interpreter and a JIT is much stronger evidence than agreement between two interpreters,
+/// because the ways a compiler can go wrong — constant folding a float expression, choosing a
+/// fused multiply-add, reassociating arithmetic — are not available to an interpreter at all.
+///
+/// It is also the closest thing in this repository to the fast path, which is a browser JIT
+/// and does not exist yet ([ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md)).
+fn run_wasmtime(module: &[u8], input: &[u8]) -> Outcome {
+    use wasmtime::{Caller, Engine, Extern, Linker, Module, Store};
+
+    let engine = Engine::default();
+    let Ok(module) = Module::new(&engine, module) else {
+        return Outcome {
+            output: None,
+            fuel: 0,
+        };
+    };
+    let mut store = Store::new(
+        &engine,
+        Host {
+            input: input.to_vec(),
+            ..Host::default()
+        },
+    );
+    let mut linker = <Linker<Host>>::new(&engine);
+
+    linker
+        .func_wrap(
+            "cairn",
+            "charge",
+            |mut caller: Caller<'_, Host>, instructions: i32| {
+                caller.data_mut().fuel += u64::from(instructions as u32);
+            },
+        )
+        .expect("charge should link");
+
+    linker
+        .func_wrap(
+            "cairn",
+            "input",
+            |mut caller: Caller<'_, Host>, ptr: i32, len: i32| -> i32 {
+                let available = caller.data().input.len();
+                let count = available.min(len as u32 as usize);
+                if count > 0 {
+                    let bytes = caller.data().input[..count].to_vec();
+                    let memory = caller
+                        .get_export("memory")
+                        .and_then(Extern::into_memory)
+                        .expect("workload exports its memory");
+                    let _ = memory.write(&mut caller, ptr as u32 as usize, &bytes);
+                }
+                available as i32
+            },
+        )
+        .expect("input should link");
+
+    linker
+        .func_wrap(
+            "cairn",
+            "output",
+            |mut caller: Caller<'_, Host>, ptr: i32, len: i32| {
+                let mut buffer = vec![0u8; len as u32 as usize];
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(Extern::into_memory)
+                    .expect("workload exports its memory");
+                if memory
+                    .read(&caller, ptr as u32 as usize, &mut buffer)
+                    .is_ok()
+                {
+                    caller.data_mut().output = buffer;
+                }
+            },
+        )
+        .expect("output should link");
+
+    let Ok(instance) = linker.instantiate(&mut store, &module) else {
+        return Outcome {
+            output: None,
+            fuel: store.data().fuel,
+        };
+    };
+
+    let entry = instance
+        .get_typed_func::<(), ()>(&mut store, validate::ENTRY_POINT)
+        .expect("workload exports its entry point");
+
+    match entry.call(&mut store, ()) {
+        Ok(()) => Outcome {
+            output: Some(store.data().output.clone()),
+            fuel: store.data().fuel,
+        },
+        Err(_) => Outcome {
+            output: None,
+            fuel: store.data().fuel,
+        },
+    }
+}
+
+/// Assert all three engines agree, and say which axis differed if they do not.
 #[track_caller]
 fn assert_agree(name: &str, text: &str, input: &[u8]) {
     let module = canonical(text);
@@ -220,6 +340,24 @@ fn assert_agree(name: &str, text: &str, input: &[u8]) {
         "{name}: fuel differs, so the two engines did not execute the same instructions",
     );
     assert_eq!(mine.output, reference.output, "{name}: output differs");
+
+    // And against the JIT. Kept as a separate block so a failure says which reference
+    // disagreed — "wasmi agrees but wasmtime does not" points at compilation, and is a very
+    // different investigation from both references disagreeing.
+    let compiled = run_wasmtime(&module, input);
+    assert_eq!(
+        mine.output.is_some(),
+        compiled.output.is_some(),
+        "{name}: cairn and wasmtime disagree about whether execution trapped",
+    );
+    assert_eq!(
+        mine.fuel, compiled.fuel,
+        "{name}: fuel differs against wasmtime, so the JIT took a different path",
+    );
+    assert_eq!(
+        mine.output, compiled.output,
+        "{name}: output differs against wasmtime",
+    );
 
     assert_instrumentation_is_transparent(name, text, input, &mine);
 }
@@ -251,14 +389,20 @@ fn assert_instrumentation_is_transparent(name: &str, text: &str, input: &[u8], m
             "{name}: {config:?} changed the result",
         );
 
-        // And under the independent engine, since the fast path is not ours. This is the
-        // check that would catch a wrong entry in `escape_site`: two engines choosing
-        // different NaN payloads only disagree observably if a payload escaped.
-        let reference = run_wasmi(&module, input);
-        assert_eq!(
-            reference.output, metered.output,
-            "{name}: the reference engine disagrees under {config:?}",
-        );
+        // And under both independent engines, since the fast path is not ours. This is the
+        // check that would catch a wrong entry in `escape_site`: engines choosing different
+        // NaN payloads only disagree observably if a payload escaped. The JIT matters most
+        // here — a compiler has far more freedom in how it evaluates float expressions, so it
+        // is the likeliest of the three to produce a payload the others do not.
+        for (engine, outcome) in [
+            ("wasmi", run_wasmi(&module, input)),
+            ("wasmtime", run_wasmtime(&module, input)),
+        ] {
+            assert_eq!(
+                outcome.output, metered.output,
+                "{name}: {engine} disagrees under {config:?}",
+            );
+        }
     }
 }
 
@@ -754,6 +898,148 @@ fn nan_payloads_cannot_escape() {
 
     for (name, text) in &cases {
         assert_agree(name, text, &[]);
+    }
+}
+
+/// A tiny deterministic PRNG, so a failing case is reproducible from its seed alone.
+///
+/// xorshift64*, chosen because it is four lines and has no dependency. Statistical quality is
+/// irrelevant here — this picks between a dozen enum variants, it does not model anything.
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0.wrapping_mul(0x2545_f491_4f6c_dd1d)
+    }
+
+    fn pick(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+/// Build a random floating-point expression.
+///
+/// Weighted towards the values that make NaN handling interesting — non-canonical payloads,
+/// both signed zeroes, both infinities, and the operand pairs that mint a NaN out of finite
+/// inputs (`inf - inf`, `0 * inf`, `0 / 0`, `sqrt` of a negative).
+fn random_f64(rng: &mut Rng, depth: u32) -> String {
+    const LEAVES: [&str; 10] = [
+        "(f64.const 0)",
+        "(f64.const -0.0)",
+        "(f64.const 1.5)",
+        "(f64.const -3.25)",
+        "(f64.const inf)",
+        "(f64.const -inf)",
+        "(f64.const 1e308)",
+        // A NaN with a payload that is not the canonical one, and one with the sign bit set.
+        "(f64.reinterpret_i64 (i64.const 0x7ff8000000000001))",
+        "(f64.reinterpret_i64 (i64.const 0xfff8000000000003))",
+        "(local.get $x)",
+    ];
+    const UNARY: [&str; 7] = [
+        "f64.sqrt",
+        "f64.abs",
+        "f64.neg",
+        "f64.ceil",
+        "f64.floor",
+        "f64.trunc",
+        "f64.nearest",
+    ];
+    const BINARY: [&str; 7] = [
+        "f64.add",
+        "f64.sub",
+        "f64.mul",
+        "f64.div",
+        "f64.min",
+        "f64.max",
+        "f64.copysign",
+    ];
+
+    if depth == 0 {
+        return LEAVES[rng.pick(LEAVES.len())].to_owned();
+    }
+    match rng.pick(10) {
+        0..=2 => {
+            let op = UNARY[rng.pick(UNARY.len())];
+            format!("({op} {})", random_f64(rng, depth - 1))
+        }
+        // Round-tripping through f32 exercises demote and promote, both of which can choose a
+        // NaN payload, and narrows the value enough to reach the infinities.
+        3 => format!(
+            "(f64.promote_f32 (f32.demote_f64 {}))",
+            random_f64(rng, depth - 1)
+        ),
+        _ => {
+            let op = BINARY[rng.pick(BINARY.len())];
+            format!(
+                "({op} {} {})",
+                random_f64(rng, depth - 1),
+                random_f64(rng, depth - 1)
+            )
+        }
+    }
+}
+
+/// Randomised float soup, checked across three engines and both instrumentation settings.
+///
+/// # Why this exists and why it is shaped like this
+///
+/// The hand-written corpus tests the divergences someone thought of. `canon::escape_site` is a
+/// hand-written table whose failure mode is **convicting an honest volunteer**, so "the cases
+/// someone thought of" is exactly the wrong coverage model for it. This generates expression
+/// trees over every float operation Cairn admits, seeded from the values most likely to mint
+/// or carry an unusual NaN, and requires Cairn's interpreter, `wasmi` and `wasmtime` to agree
+/// under full instrumentation *and* under the honest path.
+///
+/// Seeds are fixed rather than drawn from the clock. A determinism gate that tests something
+/// different on every run cannot be bisected when it fails, and would turn a real divergence
+/// into an unreproducible flake.
+///
+/// It has been checked against the mistake it exists to catch, and it found the one the
+/// hand-written cases could not: deleting `F64Copysign` from the escape set makes this fail on
+/// case 2, with `-1.5` against `+1.5` — no NaN anywhere in the answer, just a sign flipped by
+/// reading the sign bit of a NaN that the two engines produced differently.
+///
+/// It is not `wasm-smith`. That would cover far more of the instruction set, and it is the
+/// listed follow-up; what it would *not* do without substantial plumbing is concentrate on
+/// float expression shapes, which is where the newest and least-proven reasoning in this
+/// repository lives.
+#[test]
+fn random_float_expressions_agree_across_engines() {
+    const CASES: u32 = 300;
+    let mut rng = Rng(0x5eed_1234_abcd_ef01);
+
+    for case in 0..CASES {
+        let seed = rng.0;
+        let depth = 2 + (case % 3);
+        let expression = random_f64(&mut rng, depth);
+
+        // Three ways out: as raw bytes, as an integer holding the payload, and through
+        // `copysign`, which reads the sign of a computed NaN rather than its payload.
+        let escape = match case % 3 {
+            0 => format!("(f64.store (i32.const 0) {expression})"),
+            1 => format!("(i64.store (i32.const 0) (i64.reinterpret_f64 {expression}))"),
+            _ => format!("(f64.store (i32.const 0) (f64.copysign (f64.const 1.5) {expression}))"),
+        };
+
+        let text = format!(
+            r#"(module
+                 (import "cairn" "output" (func $output (param i32 i32)))
+                 (memory (export "memory") 1 8)
+                 (global $g (mut f64) (f64.const 0))
+                 (func (export "cairn_run") (local $x f64)
+                   (local.set $x (f64.reinterpret_i64 (i64.const 0x7ff8000000000005)))
+                   (global.set $g {expression})
+                   {escape}
+                   (call $output (i32.const 0) (i32.const 8))))"#
+        );
+
+        // The seed is in the failure message because that is the only thing that makes a
+        // generated failure actionable: it regenerates this exact module.
+        assert_agree(&format!("random case {case} (seed {seed:#x})"), &text, &[]);
     }
 }
 

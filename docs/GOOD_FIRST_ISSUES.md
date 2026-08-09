@@ -88,18 +88,49 @@ what broke, which is more valuable.
 
 ---
 
-### 6 · Replace the hand-written differential corpus with generated modules · **M** · `help-wanted`
+### 6 · Widen the generated corpus to whole modules · **M** · `help-wanted`
 
-`tests/differential.rs` compares Cairn's interpreter against `wasmi` on the same instrumented
-bytes. Today the inputs are hand-written cases, so it tests the divergences I thought of.
+**Partly done.** `tests/differential.rs` now generates 300 random *float expressions* per run
+and checks them across three engines — Cairn's interpreter, `wasmi`, and `wasmtime` — under
+both instrumentation settings. That generator was written narrow on purpose: it targets the
+newest and least-proven reasoning in the repository, the escape set in `canon.rs`. It earned
+its place immediately, catching a deliberately removed `copysign` escape that the hand-written
+cases could not.
 
-**Start:** `wasm-smith`, constrained to exactly `validate::admitted_features()`. Keep every
-existing case as a named seed — they were each written for a reason.
+What it does not cover is everything else: control flow, memory operations, calls, integer
+arithmetic, module shapes.
+
+**Start:** `wasm-smith`, constrained to exactly `validate::admitted_features()`. The awkward
+part is shape, not features — a Cairn workload must export `cairn_run` and `memory`, import
+only from `cairn`, and declare a memory maximum, and `wasm-smith` will not produce that
+without configuration or post-processing. Budget for that.
 **Done when:** CI runs a bounded number of generated modules per build with a fixed seed, a
 longer nightly run exists, and any failing module is minimised and committed as a permanent
 regression case.
 **Careful:** the generator must not emit features the validator rejects, or you will spend
 your time measuring the validator.
+
+---
+
+### 6b · Make metering cheap — now with evidence, and for the dispute path · **L** · `help-wanted`
+
+`canon.rs` charges fuel by injecting `i32.const N; call $charge` at every basic block. In the
+interpreter that costs 18%–41%. **On wasmtime it costs +484% to +502%**
+([ADR-0007](adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)) — a host call is
+cheap next to interpreted arithmetic and brutally expensive next to compiled arithmetic.
+
+Replace it with a module-local mutable global plus a threshold test: three arithmetic
+instructions on the common path, entering the host only when a snapshot is actually due.
+
+**Why it matters:** this only affects disputed units, since ADR-0005 moved metering off the
+honest path — but 6× is enough that a coordinator might hesitate to open a dispute, and a
+verification mechanism nobody wants to invoke is not one.
+**Careful:** the counter becomes part of machine state, so it must enter `StateCommitment`, and
+a submitted module must not be able to touch it — the same reservation rule that protects
+`cairn.charge` (see [MAINTAINER.md](MAINTAINER.md) §5).
+**Done when:** the JIT column in `docs/benchmarks.md` drops, the differential gate is still
+green across all three engines, and ADR-0007 gains a follow-up reporting the result **whether
+or not it improved**.
 
 ---
 
@@ -172,16 +203,23 @@ it used to be. The fast path does not produce a trace — it cannot, and that is
 that ADR is about. It runs the **determinism-only** module and returns a result. Trace
 production is a separate, dispute-time path that runs the fully instrumented module.
 
-**Start:** `wasmtime` as a native stand-in for the browser engine. Run the determinism-only
-module across the whole differential corpus and assert the results match the interpreter's.
-Then add the dispute-time path: same unit, fully instrumented module, trace commitment
-compared against the interpreter's.
-**Why it matters most:** determinism is baked into the binary by `canon.rs` rather than
-enforced at runtime precisely so that an engine nobody controls can be trusted with it. That
-design decision is untested until a second engine runs those bytes and agrees.
-**Done when:** two independent engines agree on results for every module in the corpus and on
-trace commitments for the instrumented variant, and any disagreement is minimised and filed —
-a real disagreement here is the most important bug report this project could receive.
+**The engine half is done.** `wasmtime` now runs every corpus case and all 300 generated ones,
+under both instrumentation settings, and agrees with the interpreter — so "determinism baked
+into the binary survives a compiler nobody controls" is tested rather than assumed, and the
+honest path's cost on a compiler is measured rather than guessed.
+
+What is missing is the **worker**: the thing that fetches a unit, runs it, and reports. In the
+browser that is a Web Worker plus JS glue around the engine already in the page; natively it is
+a binary around `wasmtime`. Neither exists, and neither does the coordinator they would talk
+to.
+
+**Start:** the native one, since it needs no browser and no server — a binary that takes a
+`.wasm` and an input file, runs it under `Config::honest_path()`, and prints the result. Then
+the dispute side: re-run the same unit under `Config::dispute_path()` and emit the trace
+commitment.
+**Done when:** a contributor can run a work unit end to end from the command line, and the
+trace it emits on demand is accepted by `dispute::resolve` against one produced by the
+interpreter.
 
 ---
 

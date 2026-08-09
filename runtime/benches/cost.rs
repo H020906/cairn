@@ -34,8 +34,16 @@
 //! against each other reads the harness's own error directly. Anything smaller than that error
 //! is reported as *not resolved*.
 //!
-//! Everything is measured on Cairn's interpreter, which is the **slow** path. The fast path is
-//! a JIT that does not exist yet.
+//! # Two engines, because the answer depends on which one you ask
+//!
+//! Most sections measure Cairn's interpreter, which is the **slow** path — the one that only
+//! runs during arbitration. One section measures wasmtime, a real optimising compiler, and it
+//! is the section that matters most, because a volunteer runs a compiler.
+//!
+//! They do not agree. The honest path is free on both. Fuel metering costs 18%–41% in the
+//! interpreter and **five to six times** on the compiler, because a host call is cheap next to
+//! interpreted arithmetic and expensive next to compiled arithmetic. See
+//! [ADR-0007](../../docs/adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md).
 //!
 //! Run with `cargo bench`.
 
@@ -164,6 +172,85 @@ fn run_once(variant: &Variant) -> (Duration, u64, usize) {
     let elapsed = start.elapsed();
 
     (elapsed, trace.steps, trace.snapshots.len())
+}
+
+/// Host state for the JIT runs, mirroring what the interpreter keeps internally.
+#[derive(Default)]
+struct Host {
+    output: Vec<u8>,
+    fuel: u64,
+}
+
+/// Execute one module under wasmtime, timing only the call.
+///
+/// Compilation and instantiation are outside the timer on purpose. Cairn pays those once per
+/// work unit, while the figures here are about the per-instruction cost of instrumentation;
+/// folding in a fixed startup cost would flatter the instrumented configurations by diluting
+/// them.
+fn run_once_jit(module: &[u8]) -> Duration {
+    use wasmtime::{Caller, Engine, Extern, Linker, Module, Store};
+
+    let engine = Engine::default();
+    let module = Module::new(&engine, module).expect("module should compile");
+    let mut store = Store::new(&engine, Host::default());
+    let mut linker = <Linker<Host>>::new(&engine);
+
+    linker
+        .func_wrap(
+            "cairn",
+            "charge",
+            |mut caller: Caller<'_, Host>, instructions: i32| {
+                caller.data_mut().fuel += u64::from(instructions as u32);
+            },
+        )
+        .expect("charge should link");
+    linker
+        .func_wrap(
+            "cairn",
+            "output",
+            |mut caller: Caller<'_, Host>, ptr: i32, len: i32| {
+                let mut buffer = vec![0u8; len as u32 as usize];
+                let memory = caller
+                    .get_export("memory")
+                    .and_then(Extern::into_memory)
+                    .expect("workload exports its memory");
+                if memory
+                    .read(&caller, ptr as u32 as usize, &mut buffer)
+                    .is_ok()
+                {
+                    caller.data_mut().output = buffer;
+                }
+            },
+        )
+        .expect("output should link");
+
+    let instance = linker
+        .instantiate(&mut store, &module)
+        .expect("module should instantiate");
+    let entry = instance
+        .get_typed_func::<(), ()>(&mut store, validate::ENTRY_POINT)
+        .expect("workload exports its entry point");
+
+    let start = Instant::now();
+    entry
+        .call(&mut store, ())
+        .expect("workload should not trap");
+    start.elapsed()
+}
+
+/// Race several modules under the JIT, with the same interleaving and rotation as [`race`].
+fn race_jit(modules: &[Vec<u8>]) -> Vec<Duration> {
+    let mut best = vec![Duration::MAX; modules.len()];
+    for module in modules {
+        run_once_jit(module);
+    }
+    for round in 0..SAMPLES {
+        for offset in 0..modules.len() {
+            let i = (round + offset) % modules.len();
+            best[i] = best[i].min(run_once_jit(&modules[i]));
+        }
+    }
+    best
 }
 
 /// One workload's cost under each configuration.
@@ -333,6 +420,14 @@ fn measure(name: &'static str, source: &str) -> Measurement {
 // Four shapes, chosen because they stress different parts of the instrumentation. A single
 // workload would hide the fact that the overhead is wildly uneven across them.
 
+/// Every workload, so the interpreter and JIT sections cannot drift apart.
+const WORKLOADS: [(&str, &str); 4] = [
+    ("integer loop", INTEGER_LOOP),
+    ("float kernel", FLOAT_KERNEL),
+    ("memory sweep", MEMORY_SWEEP),
+    ("recursion", RECURSIVE),
+];
+
 /// Integer arithmetic in a tight loop. Many small basic blocks, almost no memory traffic —
 /// the worst case for fuel metering, which charges per block.
 const INTEGER_LOOP: &str = r#"
@@ -420,18 +515,14 @@ fn main() {
          workload's noise is printed as *not resolved* instead of as a result.\n"
     );
     println!(
-        "Times are the fastest of {SAMPLES} interleaved runs on one machine, using Cairn's own \
-         interpreter — which is the **slow** path. The fast path in production is a JIT that \
-         does not exist yet; see \
-         [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) for what it can and cannot do.\n"
+        "Times are the fastest of {SAMPLES} interleaved runs on one machine. Unless a section \
+         says otherwise they use Cairn's own interpreter, which is the **slow** path — the one \
+         that only runs during arbitration. *On a JIT rather than the interpreter* measures the \
+         same things under wasmtime, and the two do not agree at all about what metering \
+         costs.\n"
     );
 
-    let measurements = [
-        measure("integer loop", INTEGER_LOOP),
-        measure("float kernel", FLOAT_KERNEL),
-        measure("memory sweep", MEMORY_SWEEP),
-        measure("recursion", RECURSIVE),
-    ];
+    let measurements = WORKLOADS.map(|(name, source)| measure(name, source));
 
     println!("## Instruction count\n");
     println!("How many more instructions the instrumented module executes.\n");
@@ -471,6 +562,7 @@ fn main() {
     );
 
     noise_floor(&measurements);
+    on_a_jit();
 
     println!("\n## The two paths, after ADR-0005\n");
     println!(
@@ -524,6 +616,56 @@ fn main() {
     bisection_cost();
     witness_size();
     verdict(&measurements);
+}
+
+/// The same overheads, measured on a compiler instead of an interpreter.
+///
+/// # Why this section is the one that matters most
+///
+/// Everything else in this document runs on Cairn's interpreter, which is the *slow* path —
+/// the one that only ever executes during arbitration. What a volunteer actually runs is a
+/// JIT, and ADR-0004 was explicit that its figures were "neither an upper nor a lower bound"
+/// because of it, guessing that metering would get worse and canonicalization much better.
+///
+/// wasmtime is not a browser engine, but it is a real optimising compiler, so this is the
+/// first evidence about that path rather than speculation about it.
+fn on_a_jit() {
+    println!("\n## On a JIT rather than the interpreter\n");
+    println!(
+        "wasmtime, compiling through Cranelift. Compilation and instantiation are outside the \
+         timer; only the call to `cairn_run` is measured. This is the closest available look at \
+         what a volunteer's own engine would pay — every other figure in this document is the \
+         interpreter.\n"
+    );
+    println!("| workload | honest path | full instrumentation |");
+    println!("|---|---:|---:|");
+
+    for (name, source) in WORKLOADS {
+        let modules = vec![
+            canonical(
+                source,
+                Config {
+                    meter_fuel: false,
+                    canonicalize: Canonicalization::Never,
+                },
+            ),
+            canonical(source, Config::honest_path()),
+            canonical(source, Config::default()),
+        ];
+        let times = race_jit(&modules);
+        println!(
+            "| {} | {:+.0}% | {:+.0}% |",
+            name,
+            (ratio(times[1], times[0]) - 1.0) * 100.0,
+            (ratio(times[2], times[0]) - 1.0) * 100.0,
+        );
+    }
+
+    println!(
+        "\nThe right-hand column runs only on a disputed unit. Note it against ADR-0004's \
+         guess that metering would cost *more* on a JIT than in the interpreter, because of \
+         the host-call boundary."
+    );
 }
 
 /// How much of any figure above is the harness rather than the code.

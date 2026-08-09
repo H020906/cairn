@@ -13,7 +13,7 @@ edition = "2021"
 # older distributions.
 rust-version = "1.86"
 license = "Apache-2.0"
-repository = "https://github.com/cairn-compute/cairn"
+repository = "https://github.com/H020906/cairn"
 authors = ["The Cairn Authors"]
 
 [workspace.dependencies]

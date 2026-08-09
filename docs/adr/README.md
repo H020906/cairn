@@ -17,6 +17,7 @@ done this way?"*
 | [0004](0004-measured-cost-supersedes-the-efficiency-claim.md) | What verification actually costs, and what that does to ADR-0001 | Accepted, corrected by 0005 |
 | [0005](0005-the-fast-path-cannot-snapshot.md) | The fast path cannot snapshot, so the trace moves to dispute time | Accepted |
 | [0006](0006-canonicalize-nans-at-escapes-on-the-honest-path.md) | Canonicalize NaNs where they can escape, not where they are made | Accepted |
+| [0007](0007-metering-is-a-jit-problem-not-an-interpreter-problem.md) | Metering is a compiler problem, and the interpreter was hiding it | Accepted |
 
 ## Reading order
 
@@ -42,6 +43,12 @@ Note what that sequence is *not*: it is not the original claim being vindicated.
 its number by assuming an overhead that was never real, on a path that cannot exist. The number
 came back because the honest path now does almost nothing. Getting the right answer for the
 wrong reasons is still getting it wrong, and the record says so.
+
+Then **0007**, which ran the same measurements on a compiler instead of an interpreter and
+found the two disagree by an order of magnitude about what metering costs. It confirms the
+honest path is genuinely free — 0% on a real optimising compiler — and reinstates a fix that
+0005 had withdrawn. It is also the cleanest example in the repository of why the engine you
+measure on is part of the measurement.
 
 ## Format
 
