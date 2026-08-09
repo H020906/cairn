@@ -83,6 +83,9 @@ And one thing that *does* exist and is the fastest way in:
 - **`browser/` — the same volunteer, in a tab.** `node browser/server.js`, no toolchain. It is
   worth opening next to `cairn-worker trace`: three engines, one answer, and the same
   instruction count reached two different ways.
+- **`cargo run --example dispute` — the ten-minute version.** Every bisection round printed,
+  ending in the one instruction the coordinator executes. Read this before `dispute.rs`, not
+  after.
 
 `CONTRIBUTING.md` lists JDK, Node and Docker as setup requirements. Today you need Rust, and
 node only if you want the browser worker.

@@ -184,6 +184,13 @@ executing *one* instruction — and the referee's 52µs is what does not grow wh
 does. `cairn-worker trace` shows the other half: the same unit, on the interpreter, producing
 the commitment that made the bisection possible.
 
+To watch it happen rather than read about it — every bisection round, the bracket narrowing,
+and the one instruction the coordinator finally executes:
+
+```bash
+cargo run --example dispute
+```
+
 Or contribute from a browser tab, with no Rust at all:
 
 ```bash
@@ -247,6 +254,8 @@ The project is explicitly built to be picked up by people who did not write it.
   sized, each with where to start and how you know you are done. Five are open; the six that
   are closed are kept with what they actually taught, because four of them turned out
   differently from how they were written.
+- **[docs/WORKLOADS.md](docs/WORKLOADS.md)** — how to write a program Cairn can run: the whole
+  interface, a working example, and a determinism reason for every refusal.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — how the pieces fit, and why determinism is a hard
   requirement rather than a nice property.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — setup, tests, and the one rule that is not

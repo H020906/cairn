@@ -171,6 +171,12 @@ Verdict: the second party was wrong.
 而裁判那 52 微秒，正是执行变长时不会跟着变长的东西。`cairn-worker trace` 展示另一半：
 同一个单元，在解释器上，产出让这场二分成为可能的那份承诺。
 
+想**看着它发生**而不是读关于它的描述——每一轮二分、区间怎么收窄、协调器最后执行的是哪一条指令：
+
+```bash
+cargo run --example dispute
+```
+
 或者从一个浏览器标签页贡献算力，完全不需要 Rust：
 
 ```bash
@@ -225,6 +231,8 @@ Cairn 是在一个刻意压短、写死的时间窗里建的，取向是**窄而
 - **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)**——写清楚了的真活儿，标了工作量，
   每一条都说明从哪里下手、怎么知道自己做完了。五条开着；已关的六条连同"它们实际教会了什么"
   一起留着，因为其中四条的结局和当初写的不一样。
+- **[docs/WORKLOADS.md](docs/WORKLOADS.md)**——怎么写一个 Cairn 能跑的程序：完整的接口、
+  一个能用的例子，以及每一条拒绝背后的确定性理由。
 - **[ARCHITECTURE.md](ARCHITECTURE.md)**——各部分怎么拼起来，以及为什么确定性是硬性要求
   而不是一个不错的性质。
 - **[CONTRIBUTING.md](CONTRIBUTING.md)**——环境搭建、测试，以及那一条不可商量的规则。

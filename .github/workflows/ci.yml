@@ -75,6 +75,14 @@ jobs:
         # deliberate and explained, which is what a failing assertion forces.
         run: cargo test --test exact_costs -- --nocapture
 
+      - name: The worked example still works
+        # `cargo run --example dispute` is the ten-minute version of this project, and a
+        # document that has stopped running is worse than no document. It is cheap, it exercises
+        # the whole path end to end — instrument, execute, bisect, adjudicate — and unlike the
+        # unit tests it would notice a change that makes the *output* nonsense while every
+        # assertion still passes.
+        run: cargo run --example dispute
+
       - name: The admission gate decides, whatever it is given
         # `validate.rs` is the only place in Cairn where bytes chosen by a stranger meet code,
         # and everything downstream is entitled to assume it ran. Its contract is total: any

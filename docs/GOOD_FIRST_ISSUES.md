@@ -54,7 +54,25 @@ the fuzz directory says how to run it longer locally.
 
 ---
 
-### 2 · An end-to-end worked example · **S** · `good-first-issue`
+### 2 · ~~An end-to-end worked example~~ — **done** · `closed`
+
+> `cargo run --example dispute`. Prepares a unit, executes it, introduces a party that diverges
+> four-fifths of the way through, drives the bisection **by hand printing every round**, and
+> adjudicates. It runs in CI, because a document that has stopped running is worse than no
+> document.
+>
+> Driving the challenge by hand rather than calling `dispute::resolve` is the whole point:
+> `resolve` is the same loop with the printing taken out, and the loop is the protocol.
+>
+> Two things it makes visible that no test does. **The liar is simulated by perturbing the
+> roots it reports** — not a shortcut but the exact shape of a party whose execution went
+> differently, because the coordinator never sees anything but roots. And the witness for the
+> disputed instruction carries **zero memory pages**, because that instruction is arithmetic;
+> true of most instructions in most programs, and the reason a witness is usually tiny.
+
+<details><summary>Original issue</summary>
+
+### An end-to-end worked example · **S** · `good-first-issue`
 
 There is no single place where you can watch the whole idea happen. Write
 `runtime/examples/dispute.rs`: build a module, execute it honestly, execute it again with one
@@ -66,9 +84,31 @@ minutes. Right now that requires reading 1,148 lines of `dispute.rs`.
 **Done when:** `cargo run --example dispute` prints a legible round-by-round trace ending in a
 verdict, and README links to it.
 
+</details>
+
 ---
 
-### 3 · Write the workload author's guide · **S** · `good-first-issue`
+### 3 · ~~Write the workload author's guide~~ — **done** · `closed`
+
+> [`docs/WORKLOADS.md`](WORKLOADS.md). The interface, a complete working unit, the six admitted
+> proposals, and — the half the original issue asked for and is easiest to skip — **a reason
+> for every refusal.** Threads are not refused because they are hard; they are refused because
+> two threads interleave differently on different machines and no trace could describe what the
+> other one did. Reference types are refused because a state root hashes the operand stack,
+> locals, memory, globals and the frame chain, and a reference is none of those.
+>
+> The rejection table quotes the validator's real message strings, which means it can go stale
+> — it was checked against `Rejection`'s `Display` when written.
+>
+> Two things in it are not in the issue and are worth keeping. **Where a workload reads its
+> input decides what a dispute costs**: reading at the end makes divergence late, which is the
+> expensive shape, and the committed example does that deliberately. And **`wasm32-wasi` will
+> not work** — it emits imports from `wasi_snapshot_preview1` — which is the first wall a real
+> author hits.
+
+<details><summary>Original issue</summary>
+
+### Write the workload author's guide · **S** · `good-first-issue`
 
 To write a program Cairn can run, you currently have to read `validate.rs` and infer the
 contract. It is small and deserves one page:
@@ -87,6 +127,14 @@ contract. It is small and deserves one page:
 
 **Done when:** `docs/WORKLOADS.md` exists, a C or Rust "hello, input/output" example compiles
 to a module the validator admits, and the rejection reasons are explained rather than listed.
+
+</details>
+
+> **Still open, and it is the half that needed a toolchain:** the guide explains how to target
+> `wasm32-unknown-unknown` from C or Rust and what link flags to pass, but **no compiled
+> example is committed** — the committed workload is hand-written WAT. Someone with a C or
+> Rust wasm toolchain should add one under `workloads/examples/` and check the flags in that
+> section are right, because they are the part of the page most likely to be wrong.
 
 ---
 
