@@ -26,10 +26,18 @@
 //!
 //! # Where the cases come from
 //!
-//! Hand-written cases cover the divergences someone thought of. That is the wrong coverage
-//! model for `canon::escape_site`, whose failure mode is convicting an honest volunteer, so
-//! there is also a seeded generator producing random float expressions — see
-//! [`random_float_expressions_agree_across_engines`]. It has already earned its place.
+//! Hand-written cases cover the divergences someone thought of, which is the wrong coverage
+//! model for a component whose failure mode is convicting an honest volunteer. So there are
+//! also two seeded generators, and both have already earned their place:
+//!
+//! - [`random_float_expressions_agree_across_engines`] builds float expression trees, aimed at
+//!   `canon::escape_site`. It caught a deliberately removed `copysign` escape that the
+//!   hand-written cases could not reach.
+//! - [`generated_modules_agree_across_engines`] builds whole modules with `wasm-smith`, aimed
+//!   at everything else — control flow, memory, calls, and combinations. **On its first run it
+//!   found a real bug**: `br 0` at function scope names WebAssembly's implicit function label
+//!   and returns, and the interpreter had no such label, so it trapped with an internal
+//!   `StackUnderflow` on a module both references ran to completion.
 //!
 //! # What is compared
 //!
@@ -61,6 +69,15 @@ struct Outcome {
     output: Option<Vec<u8>>,
     /// Instructions charged. Meaningful even on a trap: it says how far execution got.
     fuel: u64,
+    /// Cairn stopped on a ceiling of its own that no other engine shares.
+    ///
+    /// Never set by the reference engines, and **not a divergence**. Two of Cairn's limits are
+    /// deliberately unlike an ordinary engine's, for determinism: the call-depth limit is an
+    /// explicit number rather than whatever the host stack happens to allow, and the fuel
+    /// ceiling exists at all. A module that reaches either will stop in Cairn and keep going
+    /// elsewhere, correctly. The hand-written corpus stays well inside both; generated modules
+    /// do not, so they are skipped rather than compared.
+    hit_a_cairn_limit: bool,
 }
 
 /// Assemble, validate and instrument, exactly as a coordinator would.
@@ -98,6 +115,8 @@ const HONEST_CONFIGS: [Config; 2] = [
 
 /// Run under Cairn's interpreter.
 fn run_cairn(module: &[u8], input: &[u8]) -> Outcome {
+    use cairn_runtime::engine::numeric::Trap;
+
     let image = image::decode(module).expect("instrumented module should decode");
     let mut machine = match Machine::new(&image, input.to_vec(), Limits::default()) {
         Ok(machine) => machine,
@@ -105,6 +124,7 @@ fn run_cairn(module: &[u8], input: &[u8]) -> Outcome {
             return Outcome {
                 output: None,
                 fuel: 0,
+                hit_a_cairn_limit: true,
             }
         }
     };
@@ -112,12 +132,35 @@ fn run_cairn(module: &[u8], input: &[u8]) -> Outcome {
         Ok(trace) => Outcome {
             output: Some(trace.output),
             fuel: trace.fuel.get(),
+            hit_a_cairn_limit: false,
         },
-        Err(_) => Outcome {
+        Err(trap) => Outcome {
             output: None,
             fuel: machine.fuel().get(),
+            hit_a_cairn_limit: matches!(trap, Trap::OutOfFuel | Trap::CallStackExhausted),
         },
     }
+}
+
+impl Outcome {
+    /// What a reference engine reports. `hit_a_cairn_limit` is Cairn's alone by construction.
+    fn reference(output: Option<Vec<u8>>, fuel: u64) -> Self {
+        Self {
+            output,
+            fuel,
+            hit_a_cairn_limit: false,
+        }
+    }
+}
+
+/// Does `[ptr, ptr + len)` lie inside a memory of `size` bytes?
+///
+/// Both arguments arrive from the guest and are attacker-controlled in exactly the sense that
+/// matters here: `wasm-smith` will produce every value an `i32` can hold.
+fn fits(size: usize, ptr: i32, len: i32) -> bool {
+    let ptr = ptr as u32 as usize;
+    let len = len as u32 as usize;
+    ptr.checked_add(len).is_some_and(|end| end <= size)
 }
 
 /// Host state for the reference engine, mirroring what the machine keeps internally.
@@ -180,11 +223,17 @@ fn run_wasmi(module: &[u8], input: &[u8]) -> Outcome {
             "cairn",
             "output",
             |mut caller: Caller<'_, Host>, ptr: i32, len: i32| {
-                let mut buffer = vec![0u8; len as u32 as usize];
                 let memory = caller
                     .get_export("memory")
                     .and_then(Extern::into_memory)
                     .expect("workload exports its memory");
+                // Bounds-check before allocating, not after. A generated workload will happily
+                // ask for 4 GiB, and `vec![0u8; len]` would take the whole harness down with
+                // it — a hazard that only appears once the corpus stops being hand-written.
+                if !fits(memory.data_size(&caller), ptr, len) {
+                    return;
+                }
+                let mut buffer = vec![0u8; len as u32 as usize];
                 if memory
                     .read(&caller, ptr as u32 as usize, &mut buffer)
                     .is_ok()
@@ -196,10 +245,7 @@ fn run_wasmi(module: &[u8], input: &[u8]) -> Outcome {
         .expect("output should link");
 
     let Ok(instance) = linker.instantiate_and_start(&mut store, &module) else {
-        return Outcome {
-            output: None,
-            fuel: store.data().fuel,
-        };
+        return Outcome::reference(None, store.data().fuel);
     };
 
     let entry = instance
@@ -207,14 +253,8 @@ fn run_wasmi(module: &[u8], input: &[u8]) -> Outcome {
         .expect("workload exports its entry point");
 
     match entry.call(&mut store, ()) {
-        Ok(()) => Outcome {
-            output: Some(store.data().output.clone()),
-            fuel: store.data().fuel,
-        },
-        Err(_) => Outcome {
-            output: None,
-            fuel: store.data().fuel,
-        },
+        Ok(()) => Outcome::reference(Some(store.data().output.clone()), store.data().fuel),
+        Err(_) => Outcome::reference(None, store.data().fuel),
     }
 }
 
@@ -233,10 +273,7 @@ fn run_wasmtime(module: &[u8], input: &[u8]) -> Outcome {
 
     let engine = Engine::default();
     let Ok(module) = Module::new(&engine, module) else {
-        return Outcome {
-            output: None,
-            fuel: 0,
-        };
+        return Outcome::reference(None, 0);
     };
     let mut store = Store::new(
         &engine,
@@ -282,11 +319,15 @@ fn run_wasmtime(module: &[u8], input: &[u8]) -> Outcome {
             "cairn",
             "output",
             |mut caller: Caller<'_, Host>, ptr: i32, len: i32| {
-                let mut buffer = vec![0u8; len as u32 as usize];
                 let memory = caller
                     .get_export("memory")
                     .and_then(Extern::into_memory)
                     .expect("workload exports its memory");
+                // Bounds-check before allocating; see the note on the wasmi side.
+                if !fits(memory.data_size(&caller), ptr, len) {
+                    return;
+                }
+                let mut buffer = vec![0u8; len as u32 as usize];
                 if memory
                     .read(&caller, ptr as u32 as usize, &mut buffer)
                     .is_ok()
@@ -298,10 +339,7 @@ fn run_wasmtime(module: &[u8], input: &[u8]) -> Outcome {
         .expect("output should link");
 
     let Ok(instance) = linker.instantiate(&mut store, &module) else {
-        return Outcome {
-            output: None,
-            fuel: store.data().fuel,
-        };
+        return Outcome::reference(None, store.data().fuel);
     };
 
     let entry = instance
@@ -309,14 +347,8 @@ fn run_wasmtime(module: &[u8], input: &[u8]) -> Outcome {
         .expect("workload exports its entry point");
 
     match entry.call(&mut store, ()) {
-        Ok(()) => Outcome {
-            output: Some(store.data().output.clone()),
-            fuel: store.data().fuel,
-        },
-        Err(_) => Outcome {
-            output: None,
-            fuel: store.data().fuel,
-        },
+        Ok(()) => Outcome::reference(Some(store.data().output.clone()), store.data().fuel),
+        Err(_) => Outcome::reference(None, store.data().fuel),
     }
 }
 
@@ -1041,6 +1073,244 @@ fn random_float_expressions_agree_across_engines() {
         // generated failure actionable: it regenerates this exact module.
         assert_agree(&format!("random case {case} (seed {seed:#x})"), &text, &[]);
     }
+}
+
+/// Generate a whole module, shaped as a Cairn workload and using only admitted features.
+///
+/// # Why this needs so much configuration
+///
+/// `wasm-smith` produces arbitrary *valid WebAssembly*, and Cairn accepts a strict subset of
+/// that. Two kinds of constraint have to be imposed and they are imposed differently.
+///
+/// **Features** are flags. Everything Cairn refuses is switched off here rather than filtered
+/// out afterwards, because a generator that spends its randomness on modules the validator
+/// will reject is a benchmark of the validator, not of the engines.
+///
+/// **Shape** is harder, and is what `available_imports` and `exports` are for. A Cairn workload
+/// must export `cairn_run` and `memory`, import only from `cairn`, and declare a memory
+/// maximum. `wasm-smith` will not produce that on its own; given those two template modules it
+/// produces exactly it, with arbitrary bodies behind.
+fn generated_module(seed: u64) -> Option<Vec<u8>> {
+    let mut config = wasm_smith::Config {
+        // Shape.
+        available_imports: Some(
+            wat::parse_str(
+                r#"(module
+                     (import "cairn" "input"  (func (param i32 i32) (result i32)))
+                     (import "cairn" "output" (func (param i32 i32))))"#,
+            )
+            .ok()?,
+        ),
+        exports: Some(
+            wat::parse_str(
+                r#"(module
+                     (func (export "cairn_run"))
+                     (memory (export "memory") 1 4))"#,
+            )
+            .ok()?,
+        ),
+        ..wasm_smith::Config::default()
+    };
+
+    // Admitted, per `validate::admitted_features`.
+    config.bulk_memory_enabled = true;
+    config.multi_value_enabled = true;
+    config.saturating_float_to_int_enabled = true;
+    config.sign_extension_ops_enabled = true;
+
+    // Refused. Each for a stated reason in ADR-0003 or `validate.rs`: nondeterministic
+    // (threads, relaxed SIMD, under-specified SIMD corners) or uncommittable (reference types
+    // and GC have no host-independent hash; custom page sizes break the page tree's assumption).
+    config.reference_types_enabled = false;
+    config.gc_enabled = false;
+    config.simd_enabled = false;
+    config.relaxed_simd_enabled = false;
+    config.threads_enabled = false;
+    config.shared_everything_threads_enabled = false;
+    config.exceptions_enabled = false;
+    config.memory64_enabled = false;
+    config.tail_call_enabled = false;
+    config.custom_page_sizes_enabled = false;
+    config.extended_const_enabled = false;
+    config.wide_arithmetic_enabled = false;
+
+    // A start section would run code outside `cairn_run`, where nothing is metered.
+    config.allow_start_export = false;
+    config.memory_max_size_required = true;
+
+    // Zero, not one. Whatever the required exports need is generated *on top of* these limits
+    // — the documentation says so — so `max_memories: 1` produced two memories every time and
+    // the validator refused every module for `multiple memories`. Asking for none leaves the
+    // export template's memory as the only one.
+    config.min_memories = 0;
+    config.max_memories = 0;
+
+    // Enough randomness to build a module of a useful size; `Unstructured` simply runs out and
+    // finishes the module early when it is exhausted, which is a legitimate outcome.
+    let mut entropy = Vec::with_capacity(4096);
+    let mut rng = Rng(seed | 1);
+    while entropy.len() < 4096 {
+        entropy.extend_from_slice(&rng.next().to_le_bytes());
+    }
+
+    let mut unstructured = arbitrary::Unstructured::new(&entropy);
+    let mut module = wasm_smith::Module::new(config, &mut unstructured).ok()?;
+
+    // Guarantees the module halts, whichever engine runs it, by injecting a fuel counter into
+    // the module itself. Exactly the philosophy Cairn uses for determinism — put the property
+    // in the bytes rather than trusting each engine to enforce it — and it is why this test
+    // cannot hang. A budget the engines disagreed about would be useless.
+    module.ensure_termination(100_000).ok()?;
+
+    Some(module.to_bytes())
+}
+
+/// Whole randomly generated modules, checked across three engines.
+///
+/// # What this covers that the other generator does not
+///
+/// [`random_float_expressions_agree_across_engines`] targets `canon::escape_site` by building
+/// float expression trees. This targets everything else: control flow, memory operations,
+/// calls, tables, globals, and the combinations of them nobody would think to write down.
+///
+/// # What it does not cover, and why
+///
+/// Only the **fully instrumented** module is compared here. The honest-path comparison lives
+/// in the float generator and in the hand-written corpus, where every case is known to
+/// terminate. A generated module halts only because `ensure_termination` injected a counter
+/// into it, and that counter is not present in — and has nothing to do with — Cairn's own
+/// metering, so pairing the two configurations on generated code would be comparing two
+/// different termination stories rather than two instrumentation levels.
+///
+/// Modules the validator refuses are skipped and counted. The count is printed rather than
+/// asserted: what it should be depends on `wasm-smith`'s version and on the config above, and
+/// a test that pinned it would fail on an upgrade for no reason. What *is* asserted is that
+/// the skip rate leaves a useful number of modules actually executed — a silently empty corpus
+/// would pass every assertion in this file.
+#[test]
+fn generated_modules_agree_across_engines() {
+    const CASES: u64 = 200;
+
+    let mut executed = 0u32;
+    let mut refused = 0u32;
+    let mut ungeneratable = 0u32;
+    let mut exhausted = 0u32;
+    let mut reasons: Vec<String> = Vec::new();
+
+    for case in 0..CASES {
+        let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(case + 1);
+        let Some(source) = generated_module(seed) else {
+            ungeneratable += 1;
+            continue;
+        };
+
+        // A generated module can still miss Cairn's admission rules — module size, memory
+        // ceiling, an entry-point signature the config cannot constrain. Refusing it is the
+        // validator working, not the generator failing.
+        if let Err(rejection) = validate::validate_submitted(&source, validate::Limits::default()) {
+            refused += 1;
+            // Kept as distinct reasons rather than a bare count. A skip rate that is high for
+            // an understood reason is fine; one that is high for an unknown reason means the
+            // generator is mostly exercising the validator, and the difference should not need
+            // a debugging session to establish.
+            // Without dropping the offset every refusal looks distinct and the list is
+            // useless — which is how the "multiple memories" cause stayed hidden the first
+            // time this ran.
+            let full = format!("{rejection}");
+            let reason = full.split(" (at offset").next().unwrap_or(&full).to_owned();
+            if !reasons.contains(&reason) {
+                reasons.push(reason);
+            }
+            continue;
+        }
+
+        let Ok(module) = canon::instrument(&source, Config::default()) else {
+            refused += 1;
+            continue;
+        };
+
+        let name = format!("generated case {case} (seed {seed:#x})");
+        let mine = run_cairn(&module, &[]);
+
+        // Cairn's own ceilings are not divergences — see `Outcome::hit_a_cairn_limit`.
+        if mine.hit_a_cairn_limit {
+            exhausted += 1;
+            continue;
+        }
+
+        for (engine, theirs) in [
+            ("wasmi", run_wasmi(&module, &[])),
+            ("wasmtime", run_wasmtime(&module, &[])),
+        ] {
+            assert_eq!(
+                mine.output.is_some(),
+                theirs.output.is_some(),
+                "{name}: cairn and {engine} disagree about whether execution trapped",
+            );
+            assert_eq!(
+                mine.fuel, theirs.fuel,
+                "{name}: fuel differs against {engine}, so they took different paths",
+            );
+            assert_eq!(
+                mine.output, theirs.output,
+                "{name}: output differs against {engine}"
+            );
+        }
+        executed += 1;
+    }
+
+    println!(
+        "generated modules: {executed} executed, {refused} refused by the validator, \
+         {exhausted} hit a Cairn-only limit, {ungeneratable} not generatable"
+    );
+    if !reasons.is_empty() {
+        println!("  refusals: {}", reasons.join(" · "));
+    }
+    assert!(
+        executed >= CASES as u32 / 4,
+        "only {executed} of {CASES} generated modules reached the engines — the corpus has \
+         gone empty and every assertion above is vacuous"
+    );
+}
+
+#[test]
+#[ignore = "diagnostic"]
+fn probe_generated_case() {
+    let case: u64 = std::env::var("CAIRN_CASE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
+    let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(case + 1);
+    let source = generated_module(seed).expect("should generate");
+    println!(
+        "--- source ---\n{}",
+        wasmprinter::print_bytes(&source).expect("should print")
+    );
+    let module = canon::instrument(&source, Config::default()).expect("instrument");
+
+    println!(
+        "--- instrumented ---\n{}",
+        wasmprinter::print_bytes(&module).expect("should print")
+    );
+
+    let image = image::decode(&module).expect("decode");
+    let mut machine = Machine::new(&image, Vec::new(), Limits::default()).expect("instantiate");
+    loop {
+        let at = machine.commit().program_counter;
+        match machine.step() {
+            Ok(cairn_runtime::engine::machine::Progress::Finished) => {
+                println!("cairn: finished at {at:?}");
+                break;
+            }
+            Ok(_) => println!("  step {:>4} at {at:?}", machine.steps()),
+            Err(trap) => {
+                println!("cairn: TRAP {trap:?} at {at:?} (step {})", machine.steps());
+                break;
+            }
+        }
+    }
+    println!("wasmi:    {:?}", run_wasmi(&module, &[]));
+    println!("wasmtime: {:?}", run_wasmtime(&module, &[]));
 }
 
 #[test]

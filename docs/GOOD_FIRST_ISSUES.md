@@ -88,7 +88,27 @@ what broke, which is more valuable.
 
 ---
 
-### 6 · Widen the generated corpus to whole modules · **M** · `help-wanted`
+### 6 · ~~Widen the generated corpus to whole modules~~ — **done** · `closed`
+
+> Landed. `wasm-smith`, constrained to `validate::admitted_features()` and shaped by its
+> `available_imports` / `exports` templates, generates 200 whole modules per run; 146 of them
+> execute, the rest hit a Cairn-only ceiling. **It found a real bug on its first run** — `br 0`
+> at function scope names WebAssembly's implicit function label and returns, and the
+> interpreter had no such label, so it trapped with an internal `StackUnderflow` on a module
+> both reference engines completed.
+>
+> Two configuration traps recorded where they happened: the `exports` template's memory is
+> created *on top of* `max_memories`, so `max_memories: 1` yields two memories and the
+> validator refuses every module — ask for zero. And `available_imports` / `exports` silently
+> require wasm-smith's `wasmparser` feature; without it they panic at generation time.
+>
+> Still open: generated modules are compared under **full instrumentation only**. Pairing them
+> with the honest-path config would compare two different termination stories, since a
+> generated module halts because `ensure_termination` injected a counter into it.
+
+<details><summary>Original issue</summary>
+
+### Widen the generated corpus to whole modules · **M** · `help-wanted`
 
 **Partly done.** `tests/differential.rs` now generates 300 random *float expressions* per run
 and checks them across three engines — Cairn's interpreter, `wasmi`, and `wasmtime` — under
@@ -109,6 +129,8 @@ longer nightly run exists, and any failing module is minimised and committed as 
 regression case.
 **Careful:** the generator must not emit features the validator rejects, or you will spend
 your time measuring the validator.
+
+</details>
 
 ---
 

@@ -151,9 +151,17 @@ against **two** independent engines on identical instrumented bytes: `wasmi`, wh
 and `wasmtime`, which compiles through Cranelift. The second is there because a compiler can go
 wrong in ways an interpreter cannot — folding a float expression, contracting a multiply-add,
 reassociating arithmetic — and those are precisely the transformations that break bit-exact
-agreement. It contains a deliberately-divergent case so the harness cannot pass vacuously, and
-300 randomly generated float expressions per run from fixed seeds. If this goes red, engines
-disagree, which is the single largest technical risk in the project.
+agreement. It contains a deliberately-divergent case so the harness cannot pass vacuously, plus
+two seeded generators: 300 float expressions and 200 whole `wasm-smith` modules per run. If
+this goes red, engines disagree, which is the single largest technical risk in the project.
+
+**Both generators have caught real defects, which is the argument for keeping them.** The float
+one caught a removed `copysign` escape the hand-written cases could not reach. The module one
+found, on its first run, that `br 0` at function scope names WebAssembly's implicit function
+label and returns — Cairn had no such label and trapped with an internal `StackUnderflow` on a
+module both references completed. That is precisely the shape of bug the project cannot
+tolerate: Cairn stops, the volunteer's engine continues, they disagree, and arbitration
+convicts the honest worker. **If you add a generator, make it fail before you trust it.**
 
 ---
 

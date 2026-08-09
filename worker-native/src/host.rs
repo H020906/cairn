@@ -80,14 +80,26 @@ pub fn execute(module: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
             validate::HOST_MODULE,
             validate::HOST_OUTPUT,
             |mut caller: Caller<'_, Host>, ptr: i32, len: i32| {
-                let mut buffer = vec![0u8; len as u32 as usize];
-                if let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) {
-                    if memory
-                        .read(&caller, ptr as u32 as usize, &mut buffer)
-                        .is_ok()
-                    {
-                        caller.data_mut().output = buffer;
-                    }
+                let Some(memory) = caller.get_export("memory").and_then(Extern::into_memory) else {
+                    return;
+                };
+                // Bounds-check *before* allocating. `len` is chosen by the workload, and this
+                // host runs workloads a volunteer did not write: `vec![0u8; len]` on a length
+                // of `0xffff_ffff` asks the operating system for four gigabytes, which is a
+                // denial of service against the volunteer's own machine dressed up as a result.
+                // The read itself would fail, but only after the allocation succeeded or the
+                // process died trying.
+                let start = ptr as u32 as usize;
+                let count = len as u32 as usize;
+                if start
+                    .checked_add(count)
+                    .is_none_or(|end| end > memory.data_size(&caller))
+                {
+                    return;
+                }
+                let mut buffer = vec![0u8; count];
+                if memory.read(&caller, start, &mut buffer).is_ok() {
+                    caller.data_mut().output = buffer;
                 }
             },
         )

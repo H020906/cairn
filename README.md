@@ -82,6 +82,7 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
 | A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |
 | A NaN payload cannot change an answer | **Confirmed** across three engines, including a JIT, on 300 randomly generated float expressions. Checked for teeth: deleting one escape site makes it fail |
+| The interpreter agrees with real engines on arbitrary code | **Not yet.** Whole-module generation found a bug on its first run — `br 0` at function scope returns, and Cairn had no function label. Fixed; 146 generated modules now agree. Absence of evidence, so far |
 | The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
 | Cairn beats replication on cost | **Yes, currently.** ≈1.11×–1.14× against replication's ≈2.0×, on all four workload shapes |
 | Arbitrating a dispute is cheap **for the coordinator** | **Confirmed.** `O(log n)` messages and one instruction, whatever the execution length |

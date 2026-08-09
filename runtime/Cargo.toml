@@ -23,6 +23,16 @@ workspace = true
 # exactly the confidence a consensus system needs.
 wasmi = "1.1"
 wasmtime = { version = "38", default-features = false, features = ["cranelift", "runtime", "std"] }
+# Generates arbitrary valid modules, so the differential gate stops testing only the
+# instruction combinations someone thought to write down.
+# The `wasmparser` feature is what enables `available_imports` and `exports`, which is how the
+# generator is made to produce Cairn-shaped modules rather than arbitrary ones. Without it
+# those fields panic at generation time.
+wasm-smith = { version = "0.255", features = ["wasmparser"] }
+arbitrary = "1"
+# Prints a generated module back as text. Only reachable from the diagnostic probe, and worth
+# the dependency: a failing generated case is unreadable without it.
+wasmprinter = "0.255"
 wat = "1.255.0"
 
 # No criterion. What this benchmark most needs to report is exact instruction counts and

@@ -1060,11 +1060,14 @@ impl<'a> Machine<'a> {
                 }
             }
 
-            Operator::Br { relative_depth } => self.branch(*relative_depth)?,
+            // Each returns the branch's own `Progress`: a branch to the function label is a
+            // return, and swallowing that would leave the machine running in a frame it had
+            // just popped.
+            Operator::Br { relative_depth } => return self.branch(*relative_depth),
             Operator::BrIf { relative_depth } => {
                 let condition = self.pop_i32()?;
                 if condition != 0 {
-                    self.branch(*relative_depth)?;
+                    return self.branch(*relative_depth);
                 }
             }
             Operator::BrTable { targets } => {
@@ -1075,7 +1078,7 @@ impl<'a> Machine<'a> {
                     .transpose()
                     .map_err(|_| Trap::Unreachable)?
                     .unwrap_or_else(|| targets.default());
-                self.branch(chosen)?;
+                return self.branch(chosen);
             }
             Operator::Return => return self.leave(),
 
@@ -1269,13 +1272,34 @@ impl<'a> Machine<'a> {
     }
 
     /// Take a branch to the label `depth` entries from the top.
-    fn branch(&mut self, depth: u32) -> Result<(), Trap> {
+    ///
+    /// # The outermost label is the function itself
+    ///
+    /// A function body is an implicit block, and it gets a label like any other. Once every
+    /// enclosing `block`, `loop` and `if` has been left, `br 0` still names something: the
+    /// function, and branching to it **returns**. `br_table` reaches it the same way.
+    ///
+    /// This is not an exotic corner. A compiler emitting an early exit from inside nested
+    /// blocks counts outwards, and at function scope that count lands here; `wasm-smith`
+    /// produces it within a handful of modules.
+    ///
+    /// An earlier version had no such label and computed `labels.len() - (depth + 1)`, which
+    /// underflows in exactly this case and trapped with [`Trap::StackUnderflow`] — an internal
+    /// invariant failure, on a module every other engine runs to completion. **That is the
+    /// worst shape a bug can have in this project.** Cairn would have stopped where the
+    /// volunteer's engine kept going, the two would have disagreed, and arbitration would have
+    /// convicted the honest worker.
+    fn branch(&mut self, depth: u32) -> Result<Progress, Trap> {
         let frame = self.frames.last().ok_or(Trap::StackUnderflow)?;
-        let index = frame
-            .labels
-            .len()
-            .checked_sub(depth as usize + 1)
-            .ok_or(Trap::StackUnderflow)?;
+        let Some(index) = frame.labels.len().checked_sub(depth as usize + 1) else {
+            // Past the innermost labels lies the function's own. Depths beyond *that* cannot
+            // occur in a validated module, so they stay an error.
+            return if depth as usize == frame.labels.len() {
+                self.leave()
+            } else {
+                Err(Trap::StackUnderflow)
+            };
+        };
         let label = *frame.labels.get(index).ok_or(Trap::StackUnderflow)?;
 
         // Preserve the values the label carries, discard the rest of the block's stack.
@@ -1294,7 +1318,7 @@ impl<'a> Machine<'a> {
             .labels
             .truncate(if label.is_loop { index + 1 } else { index });
         frame.pc = label.branch_target;
-        Ok(())
+        Ok(Progress::Continued)
     }
 
     /// Push a frame for `function_index`, or run the host function it names.
@@ -1629,6 +1653,40 @@ mod tests {
     fn evaluates_arithmetic_end_to_end() {
         assert_eq!(eval_i32("(i32.add (i32.const 20) (i32.const 22))"), 42);
         assert_eq!(eval_i32("(i32.mul (i32.const 6) (i32.const 7))"), 42);
+    }
+
+    #[test]
+    fn branching_to_the_function_label_returns() {
+        // A function body is an implicit block. Once every enclosing construct has been left,
+        // `br 0` names the function, and taking it returns.
+        //
+        // Found by the generated differential corpus, not by hand: the interpreter trapped
+        // with `StackUnderflow` — an internal invariant failure — on a module wasmi and
+        // wasmtime both ran to completion. Left alone it would have made Cairn disagree with
+        // an honest volunteer's engine, and arbitration would have convicted the volunteer.
+        // The branch carries the function's result, exactly as a branch to any other label
+        // carries that label's.
+        assert_eq!(
+            eval_i32("(i32.const 5) (br 0) (unreachable)"),
+            5,
+            "br 0 at function scope should return"
+        );
+        assert_eq!(
+            eval_i32("(block (br 1 (i32.const 6))) (unreachable)"),
+            6,
+            "counting outwards past every block lands on the function"
+        );
+        assert_eq!(
+            eval_i32("(i32.const 8) (br_table 0 (i32.const 7)) (unreachable)"),
+            8,
+            "br_table reaches the function label the same way — this is the exact shape the \
+             generated corpus produced"
+        );
+        assert_eq!(
+            eval_i32("(i32.const 9) (br_if 0 (i32.const 1)) (unreachable)"),
+            9,
+            "so does a taken br_if"
+        );
     }
 
     #[test]

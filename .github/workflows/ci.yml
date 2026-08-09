@@ -68,12 +68,12 @@ jobs:
         run: cargo test --test differential -- --nocapture
 
       - name: Note the current limit of this gate
-        # Honest accounting, kept accurate as coverage changes. Random generation now exists
-        # but is narrow: it produces float *expressions*, targeting canon::escape_site, whose
-        # failure mode is convicting an honest worker. Control flow, memory and module shape
-        # are still corpus-driven.
+        # Honest accounting, kept accurate as coverage changes. Both generators are seeded from
+        # fixed constants so a failure is reproducible rather than a flake, which also means a
+        # run explores the same inputs every time — breadth comes from the number of cases, not
+        # from repetition.
         run: |
-          echo "::notice title=Differential coverage::Three engines. Float expressions are randomly generated from fixed seeds; control flow, memory and module shape are still hand-written cases. A pass means agreement on those, not on all inputs."
+          echo "::notice title=Differential coverage::Three engines (Cairn, wasmi, wasmtime). Randomly generated: 300 float expressions and 200 whole modules per run, from fixed seeds. Generated modules are compared under full instrumentation only; the honest-path comparison runs on the float generator and the hand-written corpus, where termination is guaranteed."
 
   # Added as the modules land. Listed here so the intended shape of CI is visible from
   # the start rather than discovered later.
