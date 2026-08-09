@@ -142,7 +142,7 @@ and an earlier version of this benchmark would have reported those numbers as fi
 |---|---|---|
 | Coordinator | **Java 21**, Spring Boot 3 | Virtual threads carry the connection fan-in without a second service |
 | Execution kernel | **Rust** | Deterministic interpretation and instruction-level replay; the JVM cannot do this |
-| Browser worker | **Rust → WASM** | Zero-install contribution, inside a Web Worker |
+| Browser worker | **JavaScript**, no build step | Zero-install contribution inside a Web Worker, around the engine already in the page. Rust→WASM was the plan until ADR-0005 made it unnecessary |
 | Native worker | **Rust** + SQLite | Single binary, resumable, for donated machines |
 | System of record | **PostgreSQL** | Units, results, trace commitments, disputes |
 | Hot path | **Redis** | Queues, leases, heartbeats, dashboard fan-out |
@@ -180,6 +180,19 @@ Verdict: the second party was wrong.
 executing *one* instruction — and the referee's 52µs is what does not grow when the execution
 does. `cairn-worker trace` shows the other half: the same unit, on the interpreter, producing
 the commitment that made the bisection possible.
+
+Or contribute from a browser tab, with no Rust at all:
+
+```bash
+node browser/server.js
+```
+
+The page runs the same unit on the engine your browser already has — **2.5 ms against the
+interpreter's 153 ms** — and reports **850,022 instructions**, exactly the number Cairn's
+interpreter reports for **the same bytes**, reached by reading a counter the module exports
+rather than by being told. There is no WebAssembly engine in [`browser/`](browser) and there is
+not supposed to be; see [its README](browser/README.md) for why that is the design and not a
+shortcut.
 
 To check the claims on this page rather than take them:
 

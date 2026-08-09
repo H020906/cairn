@@ -1,0 +1,10 @@
+{
+  "name": "cairn-browser-worker",
+  "private": true,
+  "description": "A Cairn volunteer in a browser tab: a Web Worker around the engine already in the page",
+  "type": "module",
+  "scripts": {
+    "test": "node --test policy.test.js",
+    "serve": "node server.js"
+  }
+}

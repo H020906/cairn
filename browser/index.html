@@ -1,0 +1,224 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cairn — a volunteer in a browser tab</title>
+<style>
+  :root { color-scheme: light dark; --line: color-mix(in srgb, currentColor 15%, transparent); }
+  body {
+    font: 15px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    max-width: 46rem; margin: 0 auto; padding: 2rem 1.25rem 5rem;
+  }
+  h1 { font-size: 1.1rem; letter-spacing: .02em; margin: 0 0 .25rem; }
+  h2 { font-size: .8rem; text-transform: uppercase; letter-spacing: .12em; opacity: .6;
+       margin: 2.5rem 0 .75rem; font-weight: 600; }
+  p.lede { opacity: .75; margin: 0 0 2rem; }
+  section { border: 1px solid var(--line); border-radius: 6px; padding: 1rem 1.1rem; }
+  dl { display: grid; grid-template-columns: max-content 1fr; gap: .3rem 1.25rem; margin: 0; }
+  dt { opacity: .6; }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .verdict { margin-top: .9rem; padding-top: .9rem; border-top: 1px solid var(--line); }
+  .no { color: #b4413c; }
+  .yes { color: #2c7a4b; }
+  @media (prefers-color-scheme: dark) { .no { color: #ff8a80; } .yes { color: #7ddc9e; } }
+  .controls { display: flex; flex-wrap: wrap; gap: .6rem; align-items: center; }
+  button, select, input[type=file] { font: inherit; padding: .35rem .7rem;
+    border: 1px solid var(--line); border-radius: 4px; background: transparent; color: inherit; }
+  button { cursor: pointer; }
+  button:disabled { opacity: .4; cursor: default; }
+  pre { margin: .9rem 0 0; padding: .8rem; border: 1px solid var(--line); border-radius: 4px;
+        overflow-x: auto; white-space: pre-wrap; }
+  footer { margin-top: 3rem; opacity: .6; font-size: .85rem; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+
+<h1>Cairn — a volunteer in a browser tab</h1>
+<p class="lede">
+  This page runs a Cairn work unit on the WebAssembly engine your browser already has. There is
+  no Cairn engine here and there is not supposed to be: a volunteer executes the canonical
+  module at full speed and returns an answer. It cannot say <em>how</em> it got there — no
+  browser exposes the operand stack — so it does not try. That is
+  <a href="../docs/adr/0005-the-fast-path-cannot-snapshot.md">ADR-0005</a>, and it is the whole
+  reason this file is 200 lines of glue rather than a port.
+</p>
+
+<h2>This machine</h2>
+<section>
+  <dl id="environment"></dl>
+  <div class="verdict" id="verdict">reading…</div>
+</section>
+
+<h2>Do a unit</h2>
+<section>
+  <div class="controls">
+    <select id="unit">
+      <option value="units/sum-of-squares.wasm">sum-of-squares (bundled)</option>
+      <option value="file">a unit from disk…</option>
+    </select>
+    <input type="file" id="unitFile" accept=".wasm" hidden>
+    <select id="input">
+      <option value="units/input-a.bin">input A — "alpha"</option>
+      <option value="units/input-b.bin">input B — "bravo charlie"</option>
+      <option value="">no input</option>
+    </select>
+    <button id="run">Run</button>
+    <button id="stop" disabled>Terminate</button>
+  </div>
+  <pre id="out">Ready.</pre>
+</section>
+
+<footer>
+  <strong>A running WebAssembly call cannot be interrupted from JavaScript.</strong> There is no
+  timeout and no cancellation — once <code>cairn_run</code> is entered, that thread belongs to
+  the workload. <em>Terminate</em> kills the worker outright, which is the only lever there is,
+  and it is why enforcement on the honest path is allowed to be imprecise: a volunteer who
+  stops early has produced no answer, not a wrong one. The exact, deterministic instruction
+  ceiling lives on the dispute path, where a trap is a result two parties must agree on. See
+  <a href="../docs/adr/0009-metering-through-a-global-the-engines-disagree.md">ADR-0009</a>.
+</footer>
+
+<script type="module">
+import { readEnvironment } from './environment.js';
+import { decide, DEFAULT_SHARE } from './policy.js';
+
+const $ = (id) => document.getElementById(id);
+const out = $('out');
+
+// --- what this machine is, and what that means -------------------------------------------
+
+async function refreshEnvironment() {
+  const env = await readEnvironment(DEFAULT_SHARE);
+  const verdict = decide(env);
+
+  $('environment').innerHTML = '';
+  const rows = [
+    ['cores', env.hardwareConcurrency],
+    ['power', env.charging ? 'charging or plugged in' : `on battery, ${Math.round(env.batteryLevel * 100)}%`],
+    ['battery data', env.batterySource],
+    ['connection', env.effectiveType + (env.saveData ? ', data-saving on' : '')],
+    ['tab', env.hidden ? 'in the background' : 'in the foreground'],
+  ];
+  for (const [term, value] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = term;
+    const dd = document.createElement('dd');
+    dd.textContent = String(value);
+    $('environment').append(dt, dd);
+  }
+
+  $('verdict').className = `verdict ${verdict.accept ? 'yes' : 'no'}`;
+  $('verdict').textContent = verdict.accept
+    ? `Taking work — ${verdict.reason}.`
+    : `Not taking work — ${verdict.reason}.`;
+  return verdict;
+}
+
+refreshEnvironment();
+document.addEventListener('visibilitychange', refreshEnvironment);
+
+// --- doing a unit --------------------------------------------------------------------------
+
+let worker = null;
+let nextId = 1;
+
+$('unit').addEventListener('change', () => {
+  $('unitFile').hidden = $('unit').value !== 'file';
+});
+
+async function fetchBytes(path) {
+  const response = await fetch(path);
+  if (!response.ok) throw new Error(`${path}: ${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+async function chosenModule() {
+  if ($('unit').value !== 'file') return fetchBytes($('unit').value);
+  const file = $('unitFile').files[0];
+  if (!file) throw new Error('choose a .wasm file, or pick the bundled unit');
+  return new Uint8Array(await file.arrayBuffer());
+}
+
+$('run').addEventListener('click', async () => {
+  $('run').disabled = true;
+  out.textContent = 'Compiling…';
+
+  try {
+    const [module, input] = await Promise.all([
+      chosenModule(),
+      $('input').value ? fetchBytes($('input').value) : Promise.resolve(new Uint8Array(0)),
+    ]);
+
+    worker = new Worker('./worker.js', { type: 'module' });
+    $('stop').disabled = false;
+    const id = nextId++;
+
+    worker.onmessage = (event) => {
+      const message = event.data;
+      if (message.id !== id) return;
+      out.textContent = message.ok ? report(message) : `Trapped: ${message.error}\n\n${TRAP_NOTE}`;
+      finish();
+    };
+    worker.onerror = (event) => {
+      out.textContent = `Worker failed: ${event.message}`;
+      finish();
+    };
+
+    out.textContent = 'Running…';
+    worker.postMessage({ id, module, input: input.buffer }, [input.buffer]);
+  } catch (error) {
+    out.textContent = String(error.message || error);
+    if (String(error).includes('fetch')) out.textContent += `\n\n${SERVE_NOTE}`;
+    finish();
+  }
+});
+
+$('stop').addEventListener('click', () => {
+  if (!worker) return;
+  worker.terminate();
+  out.textContent =
+    'Terminated mid-unit. The work is lost and the unit would be reassigned — which costs\n' +
+    'the network one unit of effort and costs verification nothing.';
+  finish();
+});
+
+function finish() {
+  worker = null;
+  $('run').disabled = false;
+  $('stop').disabled = true;
+}
+
+function report({ output, fuel, milliseconds }) {
+  const bytes = new Uint8Array(output);
+  const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
+  // The example workload writes a little-endian i64, which is what a result looks like when a
+  // work unit is arithmetic rather than a document.
+  const value = bytes.length === 8 ? new DataView(bytes.buffer).getBigUint64(0, true) : null;
+
+  const lines = [
+    `engine     ${navigator.userAgent.includes('Firefox') ? 'SpiderMonkey' : 'the browser\'s own'} — compiled, not interpreted`,
+    `time       ${milliseconds.toFixed(1)} ms`,
+    `result     ${bytes.length} bytes  0x${hex}`,
+  ];
+  if (value !== null) lines.push(`           = ${value}`);
+  lines.push(
+    fuel === null
+      ? 'fuel       not reported — this unit was prepared without --count-fuel'
+      : `fuel       ${Number(fuel).toLocaleString()} instructions, exactly, on any engine`,
+  );
+  return lines.join('\n');
+}
+
+const TRAP_NOTE =
+  'A trap is a legitimate outcome, not a bug: the workload failed deterministically, and\n' +
+  'every honest volunteer fails it at exactly the same instruction.';
+
+const SERVE_NOTE =
+  'Opening this file directly does not work — a browser will not load an ES module or fetch\n' +
+  'a .wasm over file://. From the repository root:\n\n    node browser/server.js';
+</script>
+
+</body>
+</html>

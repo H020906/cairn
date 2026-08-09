@@ -313,17 +313,25 @@ and why that is sound.
 
 ---
 
-### 9 · ~~Build the fast path~~ — **done natively; the browser half remains** · `help-wanted`
+### 9 · ~~Build the fast path~~ — **done, both halves** · `closed`
 
-> `worker-native/` exists. `cairn-worker run` executes a unit on wasmtime under
-> `Config::honest_path()`; `cairn-worker trace` produces a commitment on the interpreter;
-> `cairn-worker dispute` bisects two claimed executions and adjudicates. A smoke test asserts
-> the two paths agree on a real workload through the actual binary, which is the ADR-0005
-> assumption checked end to end rather than inside the differential harness.
+> `worker-native/` runs a unit on wasmtime, produces a commitment on the interpreter, and
+> settles a dispute between two claimed executions. `browser/` does the volunteer half in a
+> browser tab with **no Rust, no dependencies and no build step** — a Web Worker around the
+> engine already in the page, which is all ADR-0005 leaves for a volunteer to do.
 >
-> **What is left is the browser**, and it is a different job: a Web Worker, JS glue around the
-> engine already in the page, a CPU budget, and backing off on battery and metered connections.
-> No Rust engine work — the point of ADR-0005 is that the page's own engine is enough.
+> The three engines agree exactly on the bundled unit: Chromium, wasmtime and Cairn's
+> interpreter all answer `bd3e5cfce4250000`, and the two that were asked for an instruction
+> count both say **850,022** — one by reading an exported global, the other by counting host
+> calls. The page finishes in 2.5 ms where the interpreter takes 167 ms, a factor of 67 inside
+> the 37×–142× band ADR-0008 measured on a different engine.
+>
+> `cairn-worker prepare` was added for it: the coordinator's job, done once at registration,
+> writing the canonical binary every volunteer then runs unchanged. A browser volunteer needs
+> no toolchain because it is not allowed to instrument its own work unit.
+>
+> **What is left is not a browser problem.** There is no coordinator, so there is nothing to
+> fetch a unit *from*; the page runs units already in front of it. See MAINTAINER.md §3.
 
 <details><summary>Original issue</summary>
 
@@ -363,8 +371,8 @@ interpreter.
 
 ## Not on this list, on purpose
 
-The coordinator, the database schema, the browser worker, the dashboard, and the science
-workload are all unbuilt (see [MAINTAINER.md](MAINTAINER.md) §3). They are large, they are
+The coordinator, the database schema, the dashboard, and the science workload are all unbuilt
+(see [MAINTAINER.md](MAINTAINER.md) §3). They are large, they are
 well-specified in [ARCHITECTURE.md](../ARCHITECTURE.md), and they are ordinary engineering.
 If you want one, take it — open an issue and say so, and it is yours. They are absent here
 only because "write a distributed job coordinator" is not a first issue.

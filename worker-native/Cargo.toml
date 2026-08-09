@@ -10,6 +10,9 @@ authors.workspace = true
 
 [dependencies]
 cairn-runtime = { path = "../runtime" }
+# `prepare` prints the canonical module's hash, which is a work unit's identity. The same
+# function the runtime commits state with, so the two can never disagree about what a unit is.
+blake3.workspace = true
 # The honest path is whatever engine the volunteer already has. Natively that is wasmtime; in a
 # browser it would be the one in the page. Cairn's own interpreter is deliberately *not* used
 # for it — see ADR-0005.

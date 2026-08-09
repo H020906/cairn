@@ -67,23 +67,25 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
   not a directory that exists.
 - **No database.** No schema, no migrations. `docker-compose.yml` will start PostgreSQL and
   Redis for you and nothing will connect to them.
-- **No browser worker and no dashboard.** `worker-browser/` and `web/` do not exist.
+- **No dashboard.** `web/` does not exist.
+- **The browser worker exists but has nothing to talk to.** `browser/` runs a unit that is
+  already in front of it, and everything a volunteer does once a unit is in hand is there and
+  works. Fetching one, leases, heartbeats and reporting are all coordinator-shaped and absent.
 - **No real workload.** The molecular-docking target is an intention;
   `workloads/examples/sum-of-squares.wat` is a demonstration fixture, not science.
 
 And one thing that *does* exist and is the fastest way in:
 
-- **`worker-native/` — `cairn-worker`.** Three commands: `run` a unit on wasmtime, `trace` one
-  on the interpreter, `dispute` two claimed executions end to end. Running the last one is the
-  shortest path to understanding what this project is.
-- **No fast path.** It has not been written, and every measurement in this repository is on
-  the *slow* interpreter. Note that what it has to do got **smaller**: under
-  [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) it runs a determinism-instrumented
-  module and returns a result, rather than producing a trace commitment — which it could not
-  have done in any case.
+- **`worker-native/` — `cairn-worker`.** Four commands: `run` a unit on wasmtime, `trace` one
+  on the interpreter, `dispute` two claimed executions end to end, `prepare` the canonical
+  binary a coordinator would hand out. Running the third is the shortest path to understanding
+  what this project is.
+- **`browser/` — the same volunteer, in a tab.** `node browser/server.js`, no toolchain. It is
+  worth opening next to `cairn-worker trace`: three engines, one answer, and the same
+  instruction count reached two different ways.
 
-`CONTRIBUTING.md` lists JDK, Node and Docker as setup requirements. Today you need Rust and
-nothing else.
+`CONTRIBUTING.md` lists JDK, Node and Docker as setup requirements. Today you need Rust, and
+node only if you want the browser worker.
 
 ---
 

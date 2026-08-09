@@ -103,6 +103,7 @@ dependencies = [
 name = "cairn-worker"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "cairn-runtime",
  "wasmtime",
  "wat",

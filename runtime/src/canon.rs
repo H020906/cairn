@@ -246,6 +246,41 @@ pub fn instrument(module: &[u8], config: Config) -> Result<Vec<u8>, Error> {
     Ok(out.finish())
 }
 
+/// Has this module already been through the pass?
+///
+/// The `cairn.charge` import is the pass's signature and a reliable one in both directions: it
+/// is appended to **every** module [`instrument`] emits, whatever the [`Metering`] setting, and
+/// [`crate::validate`] refuses any submitted module that imports it. So a module carrying it
+/// came from here, and a module lacking it did not.
+///
+/// The question is worth answering because the two kinds of module travel together. A
+/// coordinator holds submissions; a volunteer holds canonical binaries; a tool handed one of
+/// them has no other way to tell which it got, and instrumenting a canonical module a second
+/// time would produce a module that meters its own metering.
+///
+/// Returns `false` for anything unparseable, which is the safe direction — an unreadable module
+/// is treated as a submission and meets the validator, which is where it should fail.
+#[must_use]
+pub fn is_canonical(module: &[u8]) -> bool {
+    for payload in wasmparser::Parser::new(0).parse_all(module) {
+        match payload {
+            Ok(Payload::ImportSection(reader)) => {
+                for import in reader.into_imports().flatten() {
+                    if import.module == HOST_MODULE && import.name == HOST_CHARGE {
+                        return true;
+                    }
+                }
+            }
+            // Imports precede everything that could follow them, so there is no reason to read
+            // the rest of the module once the section has been and gone.
+            Ok(Payload::FunctionSection(_)) => return false,
+            Err(_) => return false,
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Facts gathered in a first pass, before rewriting begins.
 ///
 /// A separate survey is needed because the code section is rewritten *while* streaming, and
@@ -1376,6 +1411,41 @@ mod tests {
                 exports(&out)
             );
         }
+    }
+
+    #[test]
+    fn a_canonical_module_can_be_told_from_a_submitted_one() {
+        // The two kinds travel together — a coordinator holds submissions, a volunteer holds
+        // canonical binaries — and a tool handed one has no other way to know which it got.
+        // Instrumenting a canonical module twice would meter its own metering.
+        assert!(!is_canonical(&wasm(WITH_IMPORTS)), "a submission");
+        assert!(
+            !is_canonical(&wasm(
+                r#"(module (memory (export "memory") 1 1) (func (export "cairn_run")))"#
+            )),
+            "a submission with no imports at all"
+        );
+
+        // Every setting, because the marker has to survive all of them: the `charge` import is
+        // appended whether or not anything calls it, which is what keeps function indices the
+        // same across configurations.
+        for config in [
+            Config::honest_path(),
+            Config::dispute_path(),
+            Config {
+                meter: Metering::Global,
+                canonicalize: Canonicalization::Never,
+            },
+        ] {
+            assert!(
+                is_canonical(&instrument(&wasm(WITH_IMPORTS), config).unwrap()),
+                "output of {config:?} must be recognisable as canonical"
+            );
+        }
+
+        // Nonsense is a submission, so it meets the validator rather than the interpreter.
+        assert!(!is_canonical(b"not wasm"));
+        assert!(!is_canonical(&[]));
     }
 
     #[test]

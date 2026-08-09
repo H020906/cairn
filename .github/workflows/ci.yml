@@ -91,6 +91,26 @@ jobs:
         run: |
           echo "::notice title=Differential coverage::Three engines (Cairn, wasmi, wasmtime). Randomly generated: 300 float expressions and 200 whole modules per run, from fixed seeds. Generated modules are compared under full instrumentation only; the honest-path comparison runs on the float generator and the hand-written corpus, where termination is guaranteed."
 
+  browser:
+    name: Browser volunteer (JavaScript)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: A volunteer's manners towards the machine it runs on
+        # `browser/policy.js` decides when to take work and how much of the machine to use, and
+        # it is pure so that this can be a test rather than a comment. A background worker that
+        # drains a phone or spends someone's mobile data is not a bug the user reports; it is a
+        # tab they close forever.
+        #
+        # No install step and no `npm ci` because there is nothing to install. The browser
+        # worker has no dependencies and no build — that is a property worth keeping, and a CI
+        # job that would start failing the moment one was added is how it stays true.
+        run: cd browser && node --test policy.test.js
+
   # Added as the modules land. Listed here so the intended shape of CI is visible from
   # the start rather than discovered later.
   #

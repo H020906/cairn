@@ -207,7 +207,7 @@ afterthought.
 
 ```mermaid
 flowchart LR
-    BW["browser tab<br/>Rust to WASM worker"]
+    BW["browser tab<br/>Web Worker, the page's own engine"]
     NW["native worker<br/>Rust + SQLite"]
     UI["dashboard<br/>React 19 + three.js"]
     CO["Cairn Coordinator<br/>Java 21 / Spring Boot 3<br/>assignment · leases · reputation<br/>canary injection · dispute referee"]
@@ -247,10 +247,17 @@ reputation, and the dispute referee. Virtual threads carry the WebSocket fan-in;
 no separate gateway service and no second backend language, because Java 21 does not need
 one.
 
-### `worker-browser/` — Rust → WASM
-The zero-install volunteer. Runs inside a Web Worker so the page stays responsive, honours
-a CPU budget, and backs off on battery power and metered connections. Opening a web page
-is the entire onboarding flow.
+### `browser/` — JavaScript · **built**
+The zero-install volunteer. Runs inside a Web Worker so the page stays responsive, honours a
+CPU budget, and backs off on battery power and metered connections. Opening a web page is the
+entire onboarding flow.
+
+**It contains no WebAssembly engine, and that is the design.** This was going to be Rust
+compiled to WASM until [ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md) established
+that a volunteer cannot produce a trace on *any* engine — so the honest path has nothing left
+to do but run the module the browser can already run. What remains is three imported functions
+and a counter to read afterwards: no dependencies, no build step, and no toolchain between a
+person and contributing. Trace production is a separate, dispute-time path in `runtime/`.
 
 ### `worker-native/` — Rust · **built**
 `cairn-worker`: `run` a unit on wasmtime under honest-path instrumentation, `trace` one on the

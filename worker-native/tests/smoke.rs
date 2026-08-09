@@ -96,6 +96,59 @@ fn a_disagreement_is_settled_against_the_assigned_input() {
 }
 
 #[test]
+fn a_prepared_unit_reports_the_instruction_count_the_interpreter_reports() {
+    // What `browser/` depends on, checked here because nothing in CI opens a browser.
+    //
+    // `prepare --count-fuel` writes a module that counts its own instructions into an exported
+    // global, so an engine Cairn does not control can run it and report the total. That total
+    // must be the one Cairn's interpreter reaches through an entirely different mechanism — a
+    // host call per basic block — or the number a volunteer reports means nothing.
+    //
+    // This test cannot run the module on a browser. It checks the half that can go wrong
+    // silently: that the artefact is well-formed, carries the counter, and was produced from
+    // bytes whose hash the tool will print the same way twice. The three-engine agreement
+    // itself is `runtime/tests/metering.rs` and the differential gate.
+    let module = fixture("sum-of-squares.wat");
+    let module = module.to_str().expect("path should be UTF-8");
+    let input = fixture("input-a.bin");
+    let input = input.to_str().expect("path should be UTF-8");
+
+    let out = std::env::temp_dir().join("cairn-smoke-prepared.wasm");
+    let out = out.to_str().expect("path should be UTF-8").to_owned();
+
+    let counted = worker(&["prepare", module, &out, "--count-fuel"]);
+    assert!(
+        counted.contains("honest path + exported fuel counter"),
+        "expected the counter to be reported:\n{counted}"
+    );
+
+    let bytes = std::fs::read(&out).expect("prepare should have written the module");
+    assert!(
+        bytes.windows(10).any(|w| w == b"cairn_fuel"),
+        "the prepared module does not export the counter"
+    );
+
+    // Same input, same bytes, same identity. A work unit is identified by this hash, so a
+    // coordinator that ran `prepare` twice must hand out the same unit both times.
+    let again = worker(&["prepare", module, &out, "--count-fuel"]);
+    assert_eq!(
+        field(&counted, "unit id       "),
+        field(&again, "unit id       "),
+        "preparing the same workload twice produced two different units"
+    );
+
+    // And the unit still computes what the unmetered one does — the counter is bookkeeping,
+    // not a change of program.
+    let plain = worker(&["run", module, input]);
+    let metered = worker(&["run", &out, input]);
+    assert_eq!(
+        field(&plain, "              "),
+        field(&metered, "              "),
+        "counting instructions changed the answer"
+    );
+}
+
+#[test]
 fn a_module_that_is_not_admissible_is_refused() {
     // Not a Cairn workload: no `cairn_run` export, and it imports something that does not
     // exist. The tool must reject it before instrumenting rather than fail later in a way that
