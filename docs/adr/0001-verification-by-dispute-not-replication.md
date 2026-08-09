@@ -5,10 +5,15 @@
 - **Supersedes:** none
 - **Superseded in part by:** [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md), [ADR-0005](0005-the-fast-path-cannot-snapshot.md)
 
-> **Two parts of this ADR are wrong.**
+> **Two parts of this ADR are wrong. Its bottom line is currently right, for reasons it does
+> not give.**
 >
 > **The "Expected cost" section.** It assumed instrumentation overhead of ≈5%; measurement
 > found nothing like that. See [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md).
+> The *conclusion* — that Cairn beats replication — holds again as of
+> [ADR-0006](0006-canonicalize-nans-at-escapes-on-the-honest-path.md), at **1.12×–1.15×**
+> against 2.00×. That is not this ADR being vindicated: the honest path it describes was
+> replaced, and the number came back because the new one does almost nothing.
 >
 > **§1, "Every result carries a commitment to its own execution".** It cannot. A stock
 > WebAssembly engine does not expose the operand stack, the locals of a live frame, the frame

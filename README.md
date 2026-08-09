@@ -81,19 +81,30 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | Metering does not change what a program computes | **Confirmed.** Every differential case, both engines, identical output and trapping |
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
 | A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |
-| Cairn beats replication on cost | **Partly.** ≈1.1× where the honest path carries no float arithmetic; ≈2.6× where it does, against replication's ≈2.0× |
+| A NaN payload cannot change an answer | **Confirmed**, adversarially. And the test was checked for teeth: deleting one escape site makes two tests fail |
+| Cairn beats replication on cost | **Yes, currently.** ≈1.12×–1.15× against replication's ≈2.0×, on all four workload shapes |
 
-That last row is the whole current state of the project in one line. Two things got there:
-measurement refuted the original cost claim
-([ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md)), and then the
-execution model underneath it turned out to be unbuildable, so it was replaced
-([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)) — which removed the verification
-cost from the honest path but left the cost of making floating point bit-exact.
+That last row took three reversals to get to, and none of them are hidden:
 
-**The benchmark also measures its own error rather than asserting one**, by timing pairs of
-configurations that compile to byte-identical modules. On one workload that error came out at
-148%, so that workload's timings are printed as *not resolved* instead of as results. An
-earlier version of this benchmark would have reported them.
+1. Measurement **refuted** the original cost claim — ≈5% assumed, nothing like it in practice
+   ([ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md)).
+2. The execution model underneath it turned out to be **unbuildable** — a stock WASM engine
+   will not show you the operand stack — so the trace moved to dispute time
+   ([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)). That took metering and
+   snapshots off the honest path and left only the cost of making floating point bit-exact.
+3. That last cost turned out to be avoidable: an engine-chosen NaN only matters where its bits
+   can become something other than a NaN, and that is **four operations**
+   ([ADR-0006](docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md)). The float
+   kernel's honest-path instruction count went from 2.30× bare to **1.00×**.
+
+**ADR-0001's conclusion is therefore right, and its reasoning is still wrong.** The number came
+back because the honest path now does almost nothing, not because the original 5% estimate was
+correct. Both facts are in the ADRs.
+
+**The benchmark measures its own error rather than asserting one**, by timing pairs of
+configurations that compile to byte-identical modules. When that error exceeds the effect, the
+figure prints as *not resolved* instead of as a result — on one earlier run it reached 148%,
+and an earlier version of this benchmark would have reported those numbers as findings.
 
 ## Stack
 

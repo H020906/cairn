@@ -4,6 +4,13 @@
 - **Date:** 2026-08-08
 - **Supersedes:** the cost analysis in [ADR-0001](0001-verification-by-dispute-not-replication.md) §"Expected cost". The rest of ADR-0001 stands.
 - **Corrected in part by:** [ADR-0005](0005-the-fast-path-cannot-snapshot.md)
+- **Overtaken by:** [ADR-0006](0006-canonicalize-nans-at-escapes-on-the-honest-path.md), which removed the cost this ADR measured
+
+> **The figures below no longer describe what a volunteer runs.** ADR-0005 moved metering and
+> snapshots off the honest path; ADR-0006 removed all but a trace of the canonicalization that
+> was left. Honest-path overhead is now inside the benchmark's ±2% noise floor on all four
+> workloads, and Cairn comes out at **1.12×–1.15×** against replication's 2.00×. Read this ADR
+> as the record of how the original claim failed, not as the current cost model.
 
 > **Two corrections, both worth reading before the figures below.**
 >

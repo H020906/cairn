@@ -71,9 +71,13 @@ argument, and what the reversal costs and buys, is
 
 The fast path still runs an *instrumented* module, just not a metered one: NaN canonicalization
 and the validated feature set are what make two honest workers agree at all, and they cannot be
-deferred. Measured, that leaves honest-path overhead **indistinguishable from zero on three of
-four benchmark workloads** — and around +150% on floating point, which is now the project's
-main cost problem.
+deferred. But they turned out to be nearly free, once it was clear *where* they are actually
+needed — an engine-chosen NaN can only change an answer at four operations, so those are the
+only places the honest path canonicalizes
+([ADR-0006](docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md)).
+
+Measured: honest-path overhead is inside the benchmark's ±2% noise floor on **all four**
+workload shapes, floating point included.
 
 ```
 volunteer returns:   result = f(input)
@@ -148,19 +152,20 @@ What measured exactly as designed is the arbitration itself: dispute cost does n
 execution length (a hundredfold longer execution costs six more rounds), and a witness is one
 64 KiB page in the worst case observed.
 
-The cost story has been rewritten twice by evidence, and both rewrites are in the ADRs rather
-than smoothed away. The original claim — beat replication because instrumentation costs ≈5% —
-was **refuted** by measurement ([ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md)).
-Then the execution model it assumed turned out to be unbuildable, and replacing it moved the
-instrumentation off the honest path entirely
-([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)). Where the benchmark can resolve
-it, honest-path overhead is now indistinguishable from zero — except on floating point, where
-NaN canonicalization costs about +150% and cannot be deferred, because it is what makes two
-honest workers agree at all.
+The cost story has been rewritten three times by evidence, and every rewrite is in the ADRs
+rather than smoothed away. The original claim — beat replication because instrumentation costs
+≈5% — was **refuted** by measurement
+([ADR-0004](docs/adr/0004-measured-cost-supersedes-the-efficiency-claim.md)). Then the
+execution model it assumed turned out to be **unbuildable**, and replacing it moved metering
+and snapshots off the honest path entirely
+([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)). That left the cost of bit-exact
+floating point, which turned out to be avoidable once it was clear how few operations can turn
+a NaN's engine-chosen bits into a different answer
+([ADR-0006](docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md)).
 
-So: **the verification tax is gone from the common path; the determinism tax on floats is
-not.** That is a different problem from the one this project started with, and a more
-tractable one.
+Where it lands: honest-path overhead inside the measurement noise on all four benchmark
+shapes, and **1.12×–1.15× against replication's 2.00×**. ADR-0001's conclusion holds — by a
+route it did not describe, on a path it did not propose, for reasons it did not give.
 
 ---
 

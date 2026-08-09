@@ -575,7 +575,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
-    use crate::canon::{self, Config};
+    use crate::canon::{self, Canonicalization, Config};
 
     /// Assemble, then instrument, exactly as a coordinator would.
     fn canonical(text: &str, config: Config) -> Vec<u8> {
@@ -590,7 +590,7 @@ mod tests {
             text,
             Config {
                 meter_fuel: false,
-                canonicalize_nan: false,
+                canonicalize: Canonicalization::Never,
             },
         )
     }

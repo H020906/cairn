@@ -31,7 +31,7 @@
 // assertions.
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
-use cairn_runtime::canon::{self, Config};
+use cairn_runtime::canon::{self, Canonicalization, Config};
 use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
 use cairn_runtime::validate;
@@ -58,16 +58,25 @@ fn canonical_with(text: &str, config: Config) -> Vec<u8> {
     canon::instrument(&source, config).expect("instrumentation should succeed")
 }
 
-/// What a volunteer runs on the fast path: determinism enforced, nothing else.
+/// Both settings a volunteer could plausibly run, checked against the fully instrumented module.
 ///
-/// Metering and snapshots are absent because the fast path cannot use them — see
-/// [ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md). This variant therefore
+/// Metering and snapshots are absent from both because the fast path cannot use them — see
+/// [ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md). Either variant therefore
 /// has to produce the same answer as the fully instrumented one, or a dispute would be
 /// arbitrating a different execution from the one whose result was submitted.
-const DETERMINISM_ONLY: Config = Config {
-    meter_fuel: false,
-    canonicalize_nan: true,
-};
+///
+/// `AtEscapes` is the interesting one and the one shipped
+/// ([ADR-0006](../../docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md)): it
+/// leaves engine-specific NaN payloads in flight and only fixes them where they could become
+/// observable. If that reasoning is wrong anywhere, it shows up here as a result that differs
+/// from the module which canonicalizes everything.
+const HONEST_CONFIGS: [Config; 2] = [
+    Config::honest_path(),
+    Config {
+        meter_fuel: false,
+        canonicalize: Canonicalization::Everywhere,
+    },
+];
 
 /// Run under Cairn's interpreter.
 fn run_cairn(module: &[u8], input: &[u8]) -> Outcome {
@@ -228,25 +237,29 @@ fn assert_agree(name: &str, text: &str, input: &[u8]) {
 /// count, which is the entire point of running it.
 #[track_caller]
 fn assert_instrumentation_is_transparent(name: &str, text: &str, input: &[u8], metered: &Outcome) {
-    let module = canonical_with(text, DETERMINISM_ONLY);
-    let plain = run_cairn(&module, input);
+    for config in HONEST_CONFIGS {
+        let module = canonical_with(text, config);
+        let plain = run_cairn(&module, input);
 
-    assert_eq!(
-        plain.output.is_some(),
-        metered.output.is_some(),
-        "{name}: metering changed whether execution trapped",
-    );
-    assert_eq!(
-        plain.output, metered.output,
-        "{name}: metering changed the result",
-    );
+        assert_eq!(
+            plain.output.is_some(),
+            metered.output.is_some(),
+            "{name}: {config:?} changed whether execution trapped",
+        );
+        assert_eq!(
+            plain.output, metered.output,
+            "{name}: {config:?} changed the result",
+        );
 
-    // And under the independent engine, since the fast path is not ours.
-    let reference = run_wasmi(&module, input);
-    assert_eq!(
-        reference.output, metered.output,
-        "{name}: the reference engine disagrees on the determinism-only module",
-    );
+        // And under the independent engine, since the fast path is not ours. This is the
+        // check that would catch a wrong entry in `escape_site`: two engines choosing
+        // different NaN payloads only disagree observably if a payload escaped.
+        let reference = run_wasmi(&module, input);
+        assert_eq!(
+            reference.output, metered.output,
+            "{name}: the reference engine disagrees under {config:?}",
+        );
+    }
 }
 
 /// Wrap an expression in a workload that writes its `i64` value out.
@@ -592,6 +605,155 @@ fn input_handling_agrees() {
         b"a longer volunteer message".as_slice(),
     ] {
         assert_agree("input round trip", module, input);
+    }
+}
+
+/// Try to get an engine-specific NaN payload to change an answer.
+///
+/// Every case here computes a NaN, drags it through as much of the instruction set as it can,
+/// and then makes it observable. `assert_agree` runs each under the fully canonicalizing
+/// module *and* under `Canonicalization::AtEscapes`, on both engines, and requires all four to
+/// produce the same bytes.
+///
+/// This is the test that would catch a missing entry in `canon::escape_site`, and it has been
+/// checked against that: deleting `I64ReinterpretF64` from the escape set makes this test fail
+/// on the payload `0x…001` leaking through, and makes `float_arithmetic_agrees` fail too.
+///
+/// That second failure is worth knowing about. It comes from `sqrt` of a negative number,
+/// which on both of these engines returns a NaN with the **sign bit set** — `0xfff8…` rather
+/// than `0x7ff8…`. So a computed NaN's sign really does vary in practice, which is what makes
+/// `copysign` a genuine escape site rather than a theoretical one: `copysign(1.0, sqrt(-1.0))`
+/// hands that sign to an ordinary number.
+#[test]
+fn nan_payloads_cannot_escape() {
+    // Kept out of `workload` because these need globals, and because the value being made
+    // observable is the point rather than an i64 expression's result.
+    fn module(globals: &str, body: &str) -> String {
+        format!(
+            r#"(module
+                 (import "cairn" "output" (func $output (param i32 i32)))
+                 (memory (export "memory") 1 8)
+                 {globals}
+                 (func (export "cairn_run")
+                   {body}
+                   (call $output (i32.const 0) (i32.const 8))))"#
+        )
+    }
+
+    // A NaN with a payload that is *not* the canonical one, built by the program itself.
+    //
+    // `0.0/0.0` would be the obvious choice and is useless here: both engines return the
+    // canonical pattern for it, so canonicalizing and not canonicalizing produce identical
+    // bytes and every assertion below would hold no matter what `escape_site` returned.
+    // Starting from a distinct payload and pushing it through arithmetic — which propagates it
+    // on both of these engines — is what gives these cases the ability to fail.
+    const RAW: &str = "(f64.reinterpret_i64 (i64.const 0x7ff8000000000001))";
+    const NAN: &str = "(f64.add (f64.reinterpret_i64 (i64.const 0x7ff8000000000001)) \
+                       (f64.const 1))";
+
+    let cases = [
+        (
+            "reinterpret exposes the payload directly",
+            module(
+                "",
+                &format!("(i64.store (i32.const 0) (i64.reinterpret_f64 {NAN}))"),
+            ),
+        ),
+        (
+            "arithmetic keeps it a NaN, the store makes it visible",
+            module(
+                "",
+                &format!(
+                    r#"(local $n f64)
+                       (local.set $n {NAN})
+                       (local.set $n (f64.add (local.get $n) (f64.const 1)))
+                       (local.set $n (f64.mul (local.get $n) (f64.const 2)))
+                       (local.set $n (f64.min (local.get $n) (f64.const 3)))
+                       (local.set $n (f64.max (local.get $n) (f64.const 4)))
+                       (local.set $n (f64.sqrt (local.get $n)))
+                       (local.set $n (f64.abs (f64.neg (local.get $n))))
+                       (f64.store (i32.const 0) (local.get $n))"#
+                ),
+            ),
+        ),
+        (
+            "a NaN parked in a global",
+            module(
+                "(global $g (mut f64) (f64.const 0))",
+                &format!(
+                    r#"(global.set $g {NAN})
+                       (i64.store (i32.const 0) (i64.reinterpret_f64 (global.get $g)))"#
+                ),
+            ),
+        ),
+        (
+            "copysign reads a computed NaN's sign",
+            module(
+                "",
+                &format!("(f64.store (i32.const 0) (f64.copysign (f64.const 1) {NAN}))"),
+            ),
+        ),
+        (
+            "comparisons against a NaN steer control flow",
+            module(
+                "",
+                &format!(
+                    r#"(local $n f64)
+                       (local.set $n {NAN})
+                       (if (f64.lt (local.get $n) (f64.const 1))
+                         (then (i64.store (i32.const 0) (i64.const 111)))
+                         (else (if (f64.ne (local.get $n) (local.get $n))
+                                 (then (i64.store (i32.const 0) (i64.const 222)))
+                                 (else (i64.store (i32.const 0) (i64.const 333))))))"#
+                ),
+            ),
+        ),
+        (
+            "saturating truncation of a NaN",
+            module(
+                "",
+                &format!(
+                    "(i64.store (i32.const 0) (i64.extend_i32_s (i32.trunc_sat_f64_s {NAN})))"
+                ),
+            ),
+        ),
+        (
+            // The program built this NaN itself and never ran a NaN-producing operation, so
+            // its payload is its own data, identical on every engine. Both modes still have to
+            // agree about what comes out — which is why `Everywhere` canonicalizes at escapes
+            // as well, rather than only after arithmetic.
+            "a payload the program chose, read straight back",
+            module(
+                "",
+                &format!("(i64.store (i32.const 0) (i64.reinterpret_f64 {RAW}))"),
+            ),
+        ),
+        (
+            "f32 by the same routes",
+            module(
+                "",
+                r#"(local $n f32)
+                   (local.set $n (f32.reinterpret_i32 (i32.const 0x7fc00001)))
+                   (local.set $n (f32.add (local.get $n) (f32.const 1)))
+                   (local.set $n (f32.max (local.get $n) (f32.const 2)))
+                   (i64.store (i32.const 0)
+                     (i64.extend_i32_u (i32.reinterpret_f32 (local.get $n))))"#,
+            ),
+        ),
+        (
+            "demote and promote across widths",
+            module(
+                "",
+                &format!(
+                    r#"(i64.store (i32.const 0)
+                         (i64.reinterpret_f64 (f64.promote_f32 (f32.demote_f64 {NAN}))))"#
+                ),
+            ),
+        ),
+    ];
+
+    for (name, text) in &cases {
+        assert_agree(name, text, &[]);
     }
 }
 

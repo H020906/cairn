@@ -117,7 +117,21 @@ than examples.
 
 ---
 
-### 8 · Don't canonicalize NaNs that cannot happen — the highest-value change in the repository · **L** · `help-wanted`
+### 8 · ~~Don't canonicalize NaNs that cannot happen~~ — **done, differently** · `closed`
+
+> Solved by [ADR-0006](adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md), and not
+> the way this issue proposed. Rather than proving a NaN cannot occur, the pass now
+> canonicalizes only at the four operations where a NaN's engine-chosen bits could become
+> something other than a NaN. The float kernel's honest-path instruction count went from 2.30×
+> bare to 1.00×. The original text is kept below because the *reason* it was the top issue —
+> and the reason a mistake here is a consensus bug rather than a slow build — has not changed.
+>
+> If you want the analysis anyway, it is still the right way to speed up the **dispute** path,
+> which does still canonicalize after every NaN-producing operation.
+
+<details><summary>Original issue</summary>
+
+### Don't canonicalize NaNs that cannot happen · **L** · `help-wanted`
 
 After [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) moved metering and snapshots off
 the honest path, Cairn has exactly one large cost left, and this is it. NaN canonicalization
@@ -141,6 +155,8 @@ analysis *declines* to skip.
 **Done when:** `cargo bench` shows the float kernel's instruction ratio below 2.30×, the
 differential gate is green, and a short ADR records which operations the analysis can clear
 and why that is sound.
+
+</details>
 
 ---
 

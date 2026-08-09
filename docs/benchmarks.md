@@ -13,7 +13,7 @@ How many more instructions the instrumented module executes.
 | workload | bare | metered | full | metering | canonicalization |
 |---|---:|---:|---:|---:|---:|
 | integer loop | 30000013 | 38000021 | 38000021 | 1.27× | 1.00× |
-| float kernel | 11500015 | 13500023 | 28500023 | 1.17× | 2.11× |
+| float kernel | 11500015 | 13500023 | 28500029 | 1.17× | 2.11× |
 | memory sweep | 6291602 | 8388842 | 8388842 | 1.33× | 1.00× |
 | recursion | 7309646 | 11123374 | 11123374 | 1.52× | 1.00× |
 
@@ -23,10 +23,10 @@ Each column is the cost of adding one thing to the one before it. `s` in ADR-000
 
 | workload | bare | +metering | +snapshots | +canonicalization | **s** |
 |---|---:|---:|---:|---:|---:|
-| integer loop | 322.3ms | 1.13× | 1.55× | 1.70× | **not resolved** |
-| float kernel | 275.9ms | 1.16× | 1.02× | 2.23× | **+163%** |
-| memory sweep | 211.7ms | 1.11× | 1.15× | 1.02× | **+30%** |
-| recursion | 480.0ms | 1.20× | 1.14× | 0.89× | **+21%** |
+| integer loop | 265.7ms | 1.25× | 1.02× | 1.00× | **+28%** |
+| float kernel | 99.5ms | 1.17× | 1.02× | 2.26× | **+170%** |
+| memory sweep | 66.2ms | 1.25× | 1.16× | 1.00× | **+45%** |
+| recursion | 198.0ms | 1.18× | 1.00× | 0.99× | **+17%** |
 
 The three middle columns are shown for decomposition only. Read them against the noise floor below before drawing anything from them — on at least one workload here the harness cannot tell these apart from nothing.
 
@@ -36,25 +36,25 @@ Measured, not assumed: these rows compare two configurations that produced ident
 
 | workload | identical bytes timed twice |
 |---|---:|
-| integer loop | +149.6% |
+| integer loop | +1.9% |
 | float kernel | — (canonicalization changes this module) |
-| memory sweep | -3.9% |
-| recursion | +9.9% |
+| memory sweep | -1.4% |
+| recursion | +1.0% |
 
-**Error bar: ±150%.**
+**Error bar: ±2%.**
 
 ## The two paths, after ADR-0005
 
 The fast path cannot snapshot, so it runs the determinism-only module and returns a result; the fully instrumented module runs only when a result is disputed. The left column is what every honest worker pays. The right column is what a disputed unit costs, on top of an execution that already happened.
 
-| workload | honest path (determinism only) | disputed re-execution (full) |
-|---|---:|---:|
-| integer loop | **not resolved** | not resolved |
-| float kernel | **+147%** | +163% |
-| memory sweep | **≈0% (±4%)** | +30% |
-| recursion | **≈0% (±10%)** | +21% |
+| workload | honest path (ADR-0006) | honest, canonicalizing everywhere | disputed re-execution |
+|---|---:|---:|---:|
+| integer loop | **≈0% (±2%)** | ≈0% (±2%) | +28% |
+| float kernel | **-0%** | +148% | +170% |
+| memory sweep | **≈0% (±1%)** | ≈0% (±1%) | +45% |
+| recursion | **≈0% (±1%)** | ≈0% (±1%) | +17% |
 
-Instruction counts confirm the left column is canonicalization and nothing else: integer loop 1.00×, float kernel 2.30×, memory sweep 1.00×, recursion 1.00×.
+The middle column is what the honest path cost before ADR-0006 narrowed canonicalization to the few operations that can actually leak a NaN payload. Exact instruction counts against bare, which is where that change is unambiguous: **integer loop 1.00×** (was 1.00×), **float kernel 1.00×** (was 2.30×), **memory sweep 1.00×** (was 1.00×), **recursion 1.00×** (was 1.00×).
 
 ## Snapshots taken at the default interval
 
@@ -71,12 +71,12 @@ Lower `k` means finer pre-committed brackets for bisection and more hashing. Thi
 
 | interval | snapshots | cost vs no snapshots |
 |---:|---:|---:|
-| 2^10 | 6144 | 2.97× |
-| 2^12 | 1536 | 1.60× |
-| 2^14 | 384 | 1.22× |
-| 2^16 | 96 | 1.19× |
-| 2^18 | 24 | 1.14× |
-| 2^20 | 6 | 1.16× |
+| 2^10 | 6144 | 3.24× |
+| 2^12 | 1536 | 1.68× |
+| 2^14 | 384 | 1.31× |
+| 2^16 | 96 | 1.18× |
+| 2^18 | 24 | 1.17× |
+| 2^20 | 6 | 1.10× |
 
 ## Dispute cost against execution length
 
@@ -102,16 +102,14 @@ An adjudicator's cost is set by this, not by the disputed execution's length. Pa
 
 ## Against ADR-0001
 
-`s` is the honest path's overhead, which after [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) is determinism instrumentation alone. It ranges from **-4%** to **+147%** across these four shapes. Full instrumentation, which now runs only on a disputed unit, costs up to +163%.
+`s` is the honest path's overhead, which after [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) is determinism instrumentation alone. It ranges from **-1%** to **+2%** across these four shapes. Full instrumentation, which now runs only on a disputed unit, costs up to +170%.
 
 | scheme | cost multiplier |
 |---|---:|
 | BOINC, N = 2 | 2.00× |
-| Cairn, best case | 1.09× |
-| Cairn, worst case | 2.60× |
+| Cairn, best case | 1.12× |
+| Cairn, worst case | 1.15× |
 
 Using the canary rate (0.03) and replication rate (0.1) ADR-0001 assumed. Those two are policy, not measurements — they are chosen, and choosing them differently moves these numbers.
 
-**Excluded from this verdict: integer loop.** On that workload the harness's own error exceeded the effect being measured, so there is no number to include. Instruction counts for it are still exact and appear above.
-
-**Verdict: ADR-0001 DOES NOT HOLD** at these settings — worst case 2.60× against 2.00×.
+**Verdict: ADR-0001 holds** at these settings — worst case 1.15× against 2.00×.

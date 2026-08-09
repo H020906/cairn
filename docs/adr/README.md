@@ -16,6 +16,7 @@ done this way?"*
 | [0003](0003-determinism-constraints.md) | Enforcing bit-exact determinism by instrumenting the workload binary | Accepted |
 | [0004](0004-measured-cost-supersedes-the-efficiency-claim.md) | What verification actually costs, and what that does to ADR-0001 | Accepted, corrected by 0005 |
 | [0005](0005-the-fast-path-cannot-snapshot.md) | The fast path cannot snapshot, so the trace moves to dispute time | Accepted |
+| [0006](0006-canonicalize-nans-at-escapes-on-the-honest-path.md) | Canonicalize NaNs where they can escape, not where they are made | Accepted |
 
 ## Reading order
 
@@ -28,10 +29,19 @@ found that 0001's *execution model* could not be built at all and replaced it. 0
 are left intact with correction banners rather than edited, so the original reasoning and the
 evidence against it can both be read. That is what superseding is for.
 
-Read 0004 and 0005 together, in that order. 0004 is the project measuring its own headline
-claim and losing; 0005 is the project finding a hole underneath the claim and, in the same
-pass, discovering that 0004's instrument was less trustworthy than 0004 said. Neither is
-comfortable. Both are the record.
+Read **0004, 0005 and 0006** together, in that order — they are one argument told over three
+documents, and reading any of them alone gives the wrong impression.
+
+0004 is the project measuring its own headline claim and losing. 0005 is the project finding a
+hole underneath the claim — the execution model could not be built — and, in the same pass,
+discovering that 0004's instrument was less trustworthy than 0004 said. 0006 removes the cost
+that was left, and ends with ADR-0001's conclusion restored at **1.15×** against replication's
+2.00×.
+
+Note what that sequence is *not*: it is not the original claim being vindicated. ADR-0001 got
+its number by assuming an overhead that was never real, on a path that cannot exist. The number
+came back because the honest path now does almost nothing. Getting the right answer for the
+wrong reasons is still getting it wrong, and the record says so.
 
 ## Format
 

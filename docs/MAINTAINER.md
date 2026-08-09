@@ -196,13 +196,27 @@ keeping — **measures its own error from byte-identical pairs and refuses to pr
 smaller than it.** Three workloads calibrate to ±2%. The integer loop does not calibrate at
 all on this machine, and its wall-clock numbers are withdrawn rather than footnoted.
 
-**What is left is a different problem from the one this project started with.** Not
-"verification is expensive" — that cost is off the common path. It is **"bit-exact floating
-point is expensive"**: NaN canonicalization costs 2.30× in instructions and about +150% in
-time, and it cannot be deferred to dispute time because it is what makes two honest workers
-agree at all. Most float operations in a numeric kernel cannot produce a NaN from non-NaN
-inputs; proving that statically would delete the check rather than optimise it. **That is the
-highest-value open problem in the repository.**
+**And then the last cost went too ([ADR-0006](adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md)).**
+NaN canonicalization looked unavoidable — 2.30× instructions on the float benchmark, and
+unlike metering it cannot be deferred, because it is what makes two honest workers agree at
+all. But an engine-chosen NaN only matters where its bits can become something *other* than a
+NaN, and that is four operations: store, `global.set` on a float global, `reinterpret`, and
+`copysign`. Everything else — arithmetic, comparisons, branches, `abs`, `neg`, `min`, `max`,
+truncation — either yields a NaN or yields the same answer for every payload. So the honest
+path canonicalizes at those four sites and nowhere else. The float kernel's instruction count
+went from 2.30× bare to **1.00×**.
+
+**Where that leaves the project: ADR-0001's conclusion holds, at 1.12×–1.15× against
+replication's 2.00×, on all four workload shapes.** Note carefully that this is not the
+original claim being vindicated. ADR-0001 assumed a ≈5% overhead on a path that cannot exist.
+The number came back because the honest path now does almost nothing.
+
+**The thing to be careful about here is `canon::escape_site`.** A missing entry is not a
+performance regression — it makes two honest workers disagree and the protocol convicts one of
+them. It is tested adversarially by `nan_payloads_cannot_escape`, and that test was checked for
+teeth: deleting `I64ReinterpretF64` makes it fail, and makes `float_arithmetic_agrees` fail
+too. If SIMD is ever admitted, every lane-wise float operation joins this analysis and the
+table must be revisited **before** the feature is enabled, not after.
 
 ---
 
@@ -215,17 +229,14 @@ read like a specification.
 **A day.** Do one item from [GOOD_FIRST_ISSUES.md](GOOD_FIRST_ISSUES.md). The point is less
 the change than getting the invariants in §5 into your hands rather than your notes.
 
-**A week.** Pick one of two, not both:
+**A week.** *Make it real* — the fast path, as ADR-0005 redefines it: a host WASM engine
+(`wasmtime` natively, the browser's own eventually) running the honest-path module and
+returning a result, plus the dispute-time re-execution that produces the trace. Until this
+exists, Cairn has one engine and the premise — execute fast, arbitrate slow — is unexercised,
+and every cost figure in this repository comes from the interpreter.
 
-- *Make floating point cheap* — §6. Prove statically that an operation cannot produce a NaN
-  and delete its canonicalization. This is now the only large cost Cairn has, and it is a
-  self-contained analysis problem over `canon.rs`. Highest value in the repository.
-- *Make it real* — the fast path, as ADR-0005 redefines it: a host WASM engine (`wasmtime`
-  natively, the browser's own eventually) running the determinism-only module and returning a
-  result, plus the dispute-time re-execution path that produces the trace. Until this exists,
-  Cairn has one engine and the premise — execute fast, arbitrate slow — is unexercised.
-
-The second is the bigger hole. The first is the better first week.
+This is now clearly the largest hole. The cost work that used to compete with it for this slot
+is done.
 
 ---
 

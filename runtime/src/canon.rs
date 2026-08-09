@@ -46,24 +46,77 @@ const CANONICAL_NAN_F32: u32 = 0x7fc0_0000;
 /// The canonical quiet NaN for `f64`.
 const CANONICAL_NAN_F64: u64 = 0x7ff8_0000_0000_0000;
 
+/// Where to force a single NaN bit pattern.
+///
+/// WebAssembly leaves the payload bits of a computed NaN up to the engine, so two honest
+/// workers can disagree about them. Cairn's answer is to overwrite every such NaN with one
+/// canonical pattern — the question this enum answers is *how often*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Canonicalization {
+    /// Never. Only for measuring what the rest of the pass costs; not a shippable setting.
+    Never,
+
+    /// After every operation whose NaN payload the specification leaves open.
+    ///
+    /// Required whenever machine state itself is committed to, which means the **dispute
+    /// path**. A state commitment hashes the operand stack and every frame's locals, so a
+    /// non-canonical NaN sitting in either one makes two honest workers' commitments differ
+    /// even though their results agree.
+    #[default]
+    Everywhere,
+
+    /// Only where a NaN's payload could become observable — see [`escape_site`].
+    ///
+    /// Sound on the **honest path**, where nothing but the result is ever compared. A NaN with
+    /// an engine-specific payload is still a NaN, and no arithmetic, comparison or branch can
+    /// turn that difference into a difference in the answer. Only a handful of operations can,
+    /// and this canonicalizes immediately before each of them.
+    ///
+    /// This is the cheaper setting by a wide margin: the float benchmark executes 2.30× its
+    /// bare instruction count under `Everywhere` and essentially its bare count under this.
+    /// See [ADR-0006](../../docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md).
+    AtEscapes,
+}
+
 /// Which parts of the pass to apply.
 ///
-/// Both default to on. They are separable so the benchmark suite can measure what each
-/// costs — ADR-0001's efficiency claim depends on that overhead being small, and a claim
-/// nobody can measure is a claim nobody should believe.
+/// Separable so the benchmark suite can measure what each costs — ADR-0001's efficiency claim
+/// depended on that overhead being small, and a claim nobody can measure is a claim nobody
+/// should believe. It was not small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
     /// Insert fuel accounting. Without it there is no trace coordinate system.
+    ///
+    /// Needed only on the dispute path, since [ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md)
+    /// moved trace production there.
     pub meter_fuel: bool,
-    /// Force a single NaN bit pattern after operations whose payload is implementation-defined.
-    pub canonicalize_nan: bool,
+    /// How aggressively to canonicalize NaNs.
+    pub canonicalize: Canonicalization,
 }
 
+/// Full instrumentation. The safe thing to get by accident.
 impl Default for Config {
     fn default() -> Self {
+        Self::dispute_path()
+    }
+}
+
+impl Config {
+    /// What a volunteer runs: determinism only, and only where determinism can be observed.
+    #[must_use]
+    pub const fn honest_path() -> Self {
+        Self {
+            meter_fuel: false,
+            canonicalize: Canonicalization::AtEscapes,
+        }
+    }
+
+    /// What both parties re-run when a result is disputed: everything.
+    #[must_use]
+    pub const fn dispute_path() -> Self {
         Self {
             meter_fuel: true,
-            canonicalize_nan: true,
+            canonicalize: Canonicalization::Everywhere,
         }
     }
 }
@@ -134,6 +187,7 @@ pub fn instrument(module: &[u8], config: Config) -> Result<Vec<u8>, Error> {
         charge_func: facts.imported_funcs,
         type_params: facts.type_params,
         function_types: facts.function_types,
+        global_widths: facts.global_widths,
         bodies_seen: 0,
         had_import_section: facts.had_import_section,
         emitted_import_section: false,
@@ -160,12 +214,27 @@ struct Survey {
     type_params: Vec<Option<u32>>,
     /// Type index of each defined function, in function-section order.
     function_types: Vec<u32>,
+    /// Float width of each global by index, imported ones first. `None` for integer globals.
+    ///
+    /// Needed because `global.set` is an escape site only when the global holds a float, and
+    /// the canonicalization sequence has to know which width to emit.
+    global_widths: Vec<Option<FloatWidth>>,
     had_import_section: bool,
+}
+
+/// The float width of a value type, or `None` if it is not a float.
+const fn float_width(ty: wasmparser::ValType) -> Option<FloatWidth> {
+    match ty {
+        wasmparser::ValType::F32 => Some(FloatWidth::F32),
+        wasmparser::ValType::F64 => Some(FloatWidth::F64),
+        _ => None,
+    }
 }
 
 fn survey(module: &[u8]) -> Result<Survey, Error> {
     let mut type_params = Vec::new();
     let mut function_types = Vec::new();
+    let mut global_widths = Vec::new();
     let mut imported_funcs = 0u32;
     let mut had_type_section = false;
     let mut had_import_section = false;
@@ -197,9 +266,23 @@ fn survey(module: &[u8]) -> Result<Survey, Error> {
                     let import = import.map_err(|e| Error::Parse {
                         detail: e.to_string(),
                     })?;
-                    if matches!(import.ty, wasmparser::TypeRef::Func(_)) {
-                        imported_funcs += 1;
+                    match import.ty {
+                        wasmparser::TypeRef::Func(_) => imported_funcs += 1,
+                        // Imported globals occupy the low indices, so they must be recorded in
+                        // the same pass to keep `global_widths` aligned with global indices.
+                        wasmparser::TypeRef::Global(ty) => {
+                            global_widths.push(float_width(ty.content_type));
+                        }
+                        _ => {}
                     }
+                }
+            }
+            Payload::GlobalSection(reader) => {
+                for global in reader {
+                    let global = global.map_err(|e| Error::Parse {
+                        detail: e.to_string(),
+                    })?;
+                    global_widths.push(float_width(global.ty.content_type));
                 }
             }
             Payload::FunctionSection(reader) => {
@@ -224,6 +307,7 @@ fn survey(module: &[u8]) -> Result<Survey, Error> {
         type_count,
         type_params,
         function_types,
+        global_widths,
         had_import_section,
     })
 }
@@ -238,6 +322,8 @@ struct Instrumenter {
     charge_func: u32,
     type_params: Vec<Option<u32>>,
     function_types: Vec<u32>,
+    /// Float width of each global by index; see [`Survey::global_widths`].
+    global_widths: Vec<Option<FloatWidth>>,
     bodies_seen: usize,
     had_import_section: bool,
     emitted_import_section: bool,
@@ -252,6 +338,43 @@ impl Instrumenter {
         params
             .checked_add(declared_locals)
             .ok_or(Error::LocalIndexOverflow)
+    }
+
+    /// Canonicalize the top of the stack *before* this operator?
+    ///
+    /// Escape sites, in **both** modes — and the fact that `Everywhere` does this too is not
+    /// redundancy, it is what makes the two modes agree.
+    ///
+    /// A program can build its own NaN with a chosen payload (`f64.reinterpret_i64` of a
+    /// constant, or a load of bytes it stored) without ever executing a NaN-*producing*
+    /// operation. `Everywhere` leaves such a value alone, correctly: it is the program's own
+    /// deterministic data, identical on every engine. But if `AtEscapes` canonicalized it on
+    /// the way out while `Everywhere` did not, the two modules would compute different answers
+    /// for that program — and observational equivalence between them is what
+    /// [ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md) rests on. Canonicalizing
+    /// at escapes in both modes makes every value that becomes observable canonical under
+    /// either, whatever it was upstream.
+    fn canonicalization_before(&self, op: &Operator<'_>) -> Option<FloatWidth> {
+        match self.config.canonicalize {
+            Canonicalization::Never => None,
+            Canonicalization::Everywhere | Canonicalization::AtEscapes => {
+                escape_site(op, &self.global_widths)
+            }
+        }
+    }
+
+    /// Canonicalize the result *after* this operator?
+    ///
+    /// Only under `Everywhere`, and only for operators that can mint an engine-chosen NaN.
+    /// This is the expensive half — it fires on ordinary arithmetic — and it exists to keep
+    /// intermediate values canonical so that a *state commitment* over the operand stack and
+    /// locals agrees between engines. On the honest path nothing commits to those, so
+    /// `AtEscapes` skips it entirely.
+    fn canonicalization_after(&self, op: &Operator<'_>) -> Option<FloatWidth> {
+        match self.config.canonicalize {
+            Canonicalization::Everywhere => nan_producing(op),
+            Canonicalization::Never | Canonicalization::AtEscapes => None,
+        }
     }
 
     /// Emit the import section entry for `charge`.
@@ -337,6 +460,47 @@ fn nan_producing(op: &Operator<'_>) -> Option<FloatWidth> {
         | Operator::F64Nearest
         | Operator::F64PromoteF32 => F64,
 
+        _ => return None,
+    })
+}
+
+/// Does this operator let a NaN's payload bits change something other than a NaN?
+///
+/// Returns the width of the value **on top of the stack** that must be canonical before the
+/// operator runs. This is the whole soundness argument for
+/// [`Canonicalization::AtEscapes`](Canonicalization::AtEscapes), so it is worth stating why
+/// the list is this short and why everything else is safe to leave alone.
+///
+/// A NaN with an engine-specific payload is still a NaN. Arithmetic on it yields a NaN.
+/// Comparisons against it are false whatever the payload. `br_if` on such a comparison takes
+/// the same branch on every engine. Truncation traps on any NaN, and the saturating form
+/// yields zero for any NaN. `abs`, `neg`, `min` and `max` yield a NaN. **None of those can
+/// turn a payload difference into an answer difference**, so none of them need the value
+/// canonical, which is what makes this mode worth having.
+///
+/// Four things can:
+///
+/// - **Stores.** The payload lands in linear memory as bytes, and memory is what a workload
+///   reports through `cairn.output`.
+/// - **`global.set` on a float global.** Same reason: the bits are kept.
+/// - **`reinterpret`.** Its entire purpose is to hand the payload over as an integer.
+/// - **`copysign`.** The *sign* of a computed NaN is as unspecified as its payload, and
+///   `copysign` reads that sign and applies it to an ordinary number. `copysign(1.0, nan)`
+///   could be `+1.0` on one engine and `-1.0` on another. Canonicalizing the top operand fixes
+///   the sign bit to zero, which fixes the result. Note this is the *only* entry that is about
+///   the sign rather than the payload, and it is the one most easily missed.
+///
+/// Calls are deliberately absent. A float argument to a defined function becomes a callee
+/// local, and locals are not observable on the honest path; if the callee stores it, the store
+/// is the escape. Cairn's host interface takes no floats at all.
+fn escape_site(op: &Operator<'_>, global_widths: &[Option<FloatWidth>]) -> Option<FloatWidth> {
+    use FloatWidth::{F32, F64};
+    Some(match op {
+        Operator::F32Store { .. } | Operator::I32ReinterpretF32 | Operator::F32Copysign => F32,
+        Operator::F64Store { .. } | Operator::I64ReinterpretF64 | Operator::F64Copysign => F64,
+        Operator::GlobalSet { global_index } => {
+            return *global_widths.get(*global_index as usize)?;
+        }
         _ => return None,
     })
 }
@@ -508,19 +672,24 @@ impl Reencode for Instrumenter {
         // no canonicalization instructions at all. The cost was entirely two unused slots per
         // frame, paid on every one of ~400,000 calls.
         //
-        // So each width is allocated only if some instruction in this function produces it.
+        // So each width is allocated only if some instruction in this function needs it — and
+        // which instructions those are depends on the mode, since `AtEscapes` canonicalizes at
+        // a different, much smaller set of sites than `Everywhere`.
         let mut needs_f32 = false;
         let mut needs_f64 = false;
-        if self.config.canonicalize_nan {
-            for op in &operators {
-                match nan_producing(op) {
+        for op in &operators {
+            for width in [
+                self.canonicalization_before(op),
+                self.canonicalization_after(op),
+            ] {
+                match width {
                     Some(FloatWidth::F32) => needs_f32 = true,
                     Some(FloatWidth::F64) => needs_f64 = true,
                     None => {}
                 }
-                if needs_f32 && needs_f64 {
-                    break;
-                }
+            }
+            if needs_f32 && needs_f64 {
+                break;
             }
         }
 
@@ -574,21 +743,23 @@ impl Reencode for Instrumenter {
                 }
             }
 
-            let width = if self.config.canonicalize_nan {
-                nan_producing(op)
-            } else {
-                None
+            let scratch = |width| match width {
+                FloatWidth::F32 => scratch_f32,
+                FloatWidth::F64 => scratch_f64,
             };
+
+            // Before: fix the operand of an operation that could leak a payload. The value is
+            // already on top of the stack, which is why this needs no shuffling.
+            if let Some(width) = self.canonicalization_before(op) {
+                emit_canonicalization(&mut func, width, scratch(width));
+            }
 
             let encoded = self.instruction(op.clone())?;
             func.instruction(&encoded);
 
-            if let Some(width) = width {
-                let scratch = match width {
-                    FloatWidth::F32 => scratch_f32,
-                    FloatWidth::F64 => scratch_f64,
-                };
-                emit_canonicalization(&mut func, width, scratch);
+            // After: fix the result of an operation that could mint an engine-chosen NaN.
+            if let Some(width) = self.canonicalization_after(op) {
+                emit_canonicalization(&mut func, width, scratch(width));
             }
         }
 
@@ -916,7 +1087,7 @@ mod tests {
             &wasm(WITH_IMPORTS),
             Config {
                 meter_fuel: false,
-                canonicalize_nan: false,
+                canonicalize: Canonicalization::Never,
             },
         )
         .unwrap();
@@ -932,7 +1103,7 @@ mod tests {
             &wasm(WITH_IMPORTS),
             Config {
                 meter_fuel: true,
-                canonicalize_nan: false,
+                canonicalize: Canonicalization::Never,
             },
         )
         .unwrap();

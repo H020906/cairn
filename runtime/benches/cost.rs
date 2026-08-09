@@ -52,7 +52,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_runtime::canon::{self, Config};
+use cairn_runtime::canon::{self, Canonicalization, Config};
 use cairn_runtime::dispute::{self, Replay, Step};
 use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
@@ -189,6 +189,12 @@ struct Measurement {
     /// belongs in ADR-0001's formula.
     honest: Duration,
     honest_steps: u64,
+    /// Canonicalizing after every NaN-producing operation, with no metering.
+    ///
+    /// What the honest path cost between ADR-0005 and ADR-0006 — kept as the comparison that
+    /// shows what narrowing canonicalization to escape sites actually bought.
+    everywhere: Duration,
+    everywhere_steps: u64,
     /// The harness's own error, when it can be read directly.
     ///
     /// `Some` when the determinism-only module and the bare module came out byte-identical —
@@ -247,26 +253,29 @@ fn measure(name: &'static str, source: &str) -> Measurement {
         source,
         Config {
             meter_fuel: false,
-            canonicalize_nan: false,
+            canonicalize: Canonicalization::Never,
         },
     );
     let metered_module = canonical(
         source,
         Config {
             meter_fuel: true,
-            canonicalize_nan: false,
+            canonicalize: Canonicalization::Never,
         },
     );
     let full_module = canonical(source, Config::default());
-    let honest_module = canonical(
+    let honest_module = canonical(source, Config::honest_path());
+    // What the honest path would have cost under ADR-0005 alone, before ADR-0006 narrowed
+    // canonicalization to escape sites. Kept so the saving is visible rather than asserted.
+    let everywhere_module = canonical(
         source,
         Config {
             meter_fuel: false,
-            canonicalize_nan: true,
+            canonicalize: Canonicalization::Everywhere,
         },
     );
 
-    // Read before the modules are moved: with no floating-point arithmetic to canonicalize,
+    // Read before the modules are moved: when a workload has no floating-point arithmetic,
     // these two configurations produce the same bytes, and the measured gap between them is
     // the harness talking about itself.
     let honest_is_bare = honest_module == bare_module;
@@ -294,6 +303,10 @@ fn measure(name: &'static str, source: &str) -> Measurement {
             module: honest_module,
             interval: NO_SNAPSHOTS,
         },
+        Variant {
+            module: everywhere_module,
+            interval: NO_SNAPSHOTS,
+        },
     ];
     let runs = race(&variants);
 
@@ -309,6 +322,8 @@ fn measure(name: &'static str, source: &str) -> Measurement {
         full_steps: runs[3].steps,
         honest: runs[4].time,
         honest_steps: runs[4].steps,
+        everywhere: runs[5].time,
+        everywhere_steps: runs[5].steps,
         noise: honest_is_bare.then(|| ratio(runs[4].time, runs[0].time) - 1.0),
     }
 }
@@ -464,25 +479,30 @@ fn main() {
          column is what every honest worker pays. The right column is what a disputed unit \
          costs, on top of an execution that already happened.\n"
     );
-    println!("| workload | honest path (determinism only) | disputed re-execution (full) |");
-    println!("|---|---:|---:|");
+    println!(
+        "| workload | honest path (ADR-0006) | honest, canonicalizing everywhere | disputed re-execution |"
+    );
+    println!("|---|---:|---:|---:|");
     for m in &measurements {
         println!(
-            "| {} | **{}** | {} |",
+            "| {} | **{}** | {} | {} |",
             m.name,
             m.resolved(m.honest_overhead()),
+            m.resolved(ratio(m.everywhere, m.bare) - 1.0),
             m.resolved(m.overhead()),
         );
     }
     println!(
-        "\nInstruction counts confirm the left column is canonicalization and nothing else: \
-         {}.",
+        "\nThe middle column is what the honest path cost before ADR-0006 narrowed \
+         canonicalization to the few operations that can actually leak a NaN payload. Exact \
+         instruction counts against bare, which is where that change is unambiguous: {}.",
         measurements
             .iter()
             .map(|m| format!(
-                "{} {:.2}×",
+                "**{} {:.2}×** (was {:.2}×)",
                 m.name,
-                m.honest_steps as f64 / m.bare_steps as f64
+                m.honest_steps as f64 / m.bare_steps as f64,
+                m.everywhere_steps as f64 / m.bare_steps as f64
             ))
             .collect::<Vec<_>>()
             .join(", ")
@@ -547,7 +567,7 @@ fn snapshot_interval_sweep() {
         MEMORY_SWEEP,
         Config {
             meter_fuel: true,
-            canonicalize_nan: false,
+            canonicalize: Canonicalization::Never,
         },
     );
 
