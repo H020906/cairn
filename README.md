@@ -2,6 +2,8 @@
 
 # Cairn
 
+**English** · [简体中文](README.zh-CN.md)
+
 **A supercomputer made of spare moments.**
 
 Open a browser tab, donate the CPU you were not using, and help compute something that
@@ -38,8 +40,9 @@ all the power people donated.
 
 Cairn attacks both.
 
-The first is engineering: the worker compiles to WebAssembly and runs in a browser tab.
-Opening a page is the entire onboarding flow.
+The first is engineering: the worker is a Web Worker around the WebAssembly engine the browser
+already has. Opening a page is the entire onboarding flow — no install, no dependencies, and
+no build step. [`browser/`](browser) does this today.
 
 The second is the reason this project exists. The verification mechanism works, is cheap to
 arbitrate, and — after a design correction described below — costs the honest volunteer
@@ -84,7 +87,7 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | A NaN payload cannot change an answer | **Confirmed** across three engines, including a JIT, on 300 randomly generated float expressions. Checked for teeth: deleting one escape site makes it fail |
 | The interpreter agrees with real engines on arbitrary code | **Not yet.** Whole-module generation found a bug on its first run — `br 0` at function scope returns, and Cairn had no function label. Fixed; 146 generated modules now agree. Absence of evidence, so far |
 | The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
-| Cairn beats replication on cost | **Yes, currently.** ≈1.11×–1.14× against replication's ≈2.0×, on all four workload shapes |
+| Cairn beats replication on cost | **Yes, currently.** ≈1.09×–1.18× against replication's ≈2.0×, on all four workload shapes |
 | Arbitrating a dispute is cheap **for the coordinator** | **Confirmed.** `O(log n)` messages and one instruction, whatever the execution length |
 | Arbitrating a dispute is cheap **for the two parties** | **No.** They must re-execute under Cairn's interpreter to produce a trace at all, and it is 37×–142× slower than the engine they did the work on |
 | A party's dispute cost is set by execution length | **Refuted.** It is set by *where the two diverged*. Checkpointed replay makes a late-diverging 1.9M-step dispute **14.4× cheaper** and an early-diverging one no cheaper at all |
@@ -200,32 +203,32 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-206 tests. Among them: an interpreter checked instruction-by-instruction against **two**
-independent WASM engines including a JIT, 300 randomly generated float expressions per run, a
-bisection game that converges on a corrupted instruction, and an adjudication that names the
-liar without replaying the job. Then `cargo bench` regenerates the numbers above, including the
-ones that came out badly.
+222 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
+randomly generated float expressions and 200 whole generated modules per run, a bisection game
+that converges on a corrupted instruction, and an adjudication that names the liar without
+replaying the job. Then `cargo bench` regenerates the numbers above, including the ones that
+came out badly.
 
 ## Roadmap
 
 Cairn is being built in a deliberately short, fixed window, with a bias toward *narrow and
 finished* over *broad and abandoned*.
 
-**What exists is the verification kernel and a command-line worker.** The stack table above
-describes the design; the Java coordinator, the database schema, the browser worker and the
-dashboard are not in this repository. That is stated plainly rather than left implied by
-unticked boxes.
+**What exists is the verification kernel and the two workers.** The stack table above describes
+the design; the Java coordinator, the database schema and the dashboard are not in this
+repository. That is stated plainly rather than left implied by unticked boxes.
 
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~10.5k lines of Rust, 206 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~11.2k lines of Rust, 222 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
+| **Browser volunteer** | **Done** — a Web Worker around the page's own engine; no install, no dependencies, no build step |
 | Coordinator: domain model, schema, assignment, leases | Not started |
 | Verification policy: canaries, reputation, selective replication | Not started |
-| Browser volunteer node | Not started |
 | Dashboard + live globe | Not started |
 | A real scientific workload (molecular docking) | Not started |
 
@@ -240,8 +243,10 @@ The project is explicitly built to be picked up by people who did not write it.
 - **[docs/MAINTAINER.md](docs/MAINTAINER.md)** — the state of the project, honestly: what
   works, what does not, the seven invariants that must not be broken, and what to do with
   your first hour, day and week.
-- **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** — nine specified pieces of real
-  work, sized, each with where to start and how you know you are done.
+- **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** — specified pieces of real work,
+  sized, each with where to start and how you know you are done. Five are open; the six that
+  are closed are kept with what they actually taught, because four of them turned out
+  differently from how they were written.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — how the pieces fit, and why determinism is a hard
   requirement rather than a nice property.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — setup, tests, and the one rule that is not
