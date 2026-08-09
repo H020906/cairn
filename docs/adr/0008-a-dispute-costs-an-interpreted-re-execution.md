@@ -103,11 +103,48 @@ list says so. **ADR-0007's reinstatement of it stands; its urgency does not.**
 **0%** on a real optimising compiler. That is what a volunteer pays, and it is the number the
 project lives or dies by.
 
-**Checkpointing in `Replay` becomes worth doing.** It halves the dispute cost, it is a
-self-contained change to one party's bookkeeping, and it changes nothing about the protocol.
+**Checkpointing in `Replay` becomes worth doing.** It is a self-contained change to one party's
+bookkeeping and changes nothing about the protocol. **Done — see the follow-up below.**
 
 **Bench and docs now carry the ratio.** `docs/benchmarks.md` reports interpreter ÷ JIT per
 workload, so this cost cannot quietly stop being visible.
+
+## Follow-up: what checkpointing actually bought
+
+Implemented, and it taught something the estimate above had wrong.
+
+| divergence | execution length | replaying from 0 | with checkpoints | |
+|---|---:|---:|---:|---:|
+| early (step 4) | 19,028 | 2.4 ms | 2.4 ms | 1.0× |
+| early (step 4) | 190,028 | 13.5 ms | 12.8 ms | 1.1× |
+| early (step 4) | 1,900,028 | 130.3 ms | 40.4 ms | 3.2× |
+| late (step 19,016) | 19,028 | 12.0 ms | 3.4 ms | 3.6× |
+| late (step 190,016) | 190,028 | 89.2 ms | 7.6 ms | 11.7× |
+| late (step 1,900,016) | 1,900,028 | 1.2 s | 84.6 ms | **14.4×** |
+
+**"About half" was the wrong model.** What a dispute costs a party is not set by the execution's
+length but by **where the two parties diverged**. Every bisection question converges on the
+divergence point, so a naive party replays roughly `divergence × log₂(n)` instructions. A
+dispute that diverges in its first few instructions was never expensive and checkpoints cannot
+make it cheaper; one that diverges near the end is where `O(n log n)` bites, and there they are
+worth up to 14×.
+
+That is also why the checkpoints are recorded **while answering** rather than laid down by a
+preparatory sweep. The first implementation swept the whole execution up front to space them
+evenly, which charged every early-divergence dispute a full execution it did not need — and
+measured *slower* than no checkpoints at all on short ones. Recording opportunistically means
+the party never steps an instruction it would not have stepped anyway.
+
+Two smaller things worth keeping:
+
+- **The interval has a floor of 4,096 instructions.** A checkpoint copies the whole machine,
+  most of it linear memory; below a few thousand instructions, replaying from further back is
+  cheaper than the copy that would avoid it. Without the floor the shortest disputes ran ~30%
+  slower.
+- **The interval is derived from the largest step ever asked for, not the first.** A bisection's
+  opening exchange includes step 0. Deriving the spacing from the first question therefore set
+  it to 1 and cloned the entire machine on every instruction — not a slow path, a hang. There is
+  a regression test named after it.
 
 ## Alternatives considered
 

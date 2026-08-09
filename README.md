@@ -85,7 +85,8 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
 | Cairn beats replication on cost | **Yes, currently.** ≈1.11×–1.14× against replication's ≈2.0×, on all four workload shapes |
 | Arbitrating a dispute is cheap **for the coordinator** | **Confirmed.** `O(log n)` messages and one instruction, whatever the execution length |
-| Arbitrating a dispute is cheap **for the two parties** | **No — ≈200× a normal run each.** They must re-execute under Cairn's interpreter to produce a trace at all, and it is 37×–142× slower than the engine they did the work on |
+| Arbitrating a dispute is cheap **for the two parties** | **No.** They must re-execute under Cairn's interpreter to produce a trace at all, and it is 37×–142× slower than the engine they did the work on |
+| A party's dispute cost is set by execution length | **Refuted.** It is set by *where the two diverged*. Checkpointed replay makes a late-diverging 1.9M-step dispute **14.4× cheaper** and an early-diverging one no cheaper at all |
 
 That last row took three reversals to get to, and none of them are hidden:
 

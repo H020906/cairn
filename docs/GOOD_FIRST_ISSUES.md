@@ -143,7 +143,22 @@ or not it improved**.
 
 ---
 
-### 6c · Checkpoint the replay, and halve what a dispute costs · **M** · `help-wanted`
+### 6c · ~~Checkpoint the replay~~ — **done** · `closed`
+
+> Landed. `Replay` keeps up to 32 full machine states and resumes from the nearest one, and a
+> late-diverging dispute over a 1.9M-step execution went from **1.2 s to 84.6 ms (14.4×)**.
+> The follow-up section of
+> [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md) records what the estimate
+> below got wrong: dispute cost is set by *where the parties diverged*, not by execution
+> length, so an early divergence gains nothing and a late one gains everything.
+>
+> Two traps it walked into, both now regression-tested: laying checkpoints down in a
+> preparatory sweep makes short disputes *slower*, and deriving the spacing from the first
+> question sets it to 1 — a bisection opens by asking about step 0.
+
+<details><summary>Original issue</summary>
+
+### Checkpoint the replay, and halve what a dispute costs · **M** · `help-wanted`
 
 `dispute::Replay` answers each bisection round by re-executing **from the beginning**, so a
 full bisection costs a party `O(n log n)`. The code says so where it happens; it was written
@@ -163,6 +178,8 @@ with different memory budgets would answer differently.
 **Done when:** replaying a 2-million-step execution answers a full bisection in time
 proportional to one execution rather than twenty, the existing dispute tests still pass
 unchanged, and a test pins that the answers are identical with and without checkpoints.
+
+</details>
 
 ---
 

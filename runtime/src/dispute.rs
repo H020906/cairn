@@ -475,52 +475,198 @@ pub fn adjudicate(
     )
 }
 
+/// How many resume points [`Replay`] keeps by default.
+///
+/// The whole trade is here. Each checkpoint is a full machine state — most of it linear
+/// memory — so the memory cost is roughly `budget × the workload's memory ceiling`, while the
+/// time cost of an answer falls as `n / budget`. Thirty-two keeps a bisection to under two
+/// executions' worth of stepping, and costs a few tens of megabytes on a workload using a
+/// megabyte of memory.
+///
+/// A worker with less memory should lower it rather than accept swapping; a native worker with
+/// plenty can raise it. Nothing the coordinator sees changes either way.
+pub const DEFAULT_CHECKPOINT_BUDGET: usize = 32;
+
+/// Never checkpoint more often than this, whatever the budget allows.
+///
+/// A checkpoint copies the whole machine, most of it linear memory. Below a few thousand
+/// instructions, replaying from further back is cheaper than the copy that would avoid it —
+/// measured, an unbounded interval made the shortest disputes about 30% *slower*. This is where
+/// the two curves cross on the workloads in `benches/cost.rs`; it is a constant rather than
+/// something adaptive because getting it roughly right is enough.
+const MIN_CHECKPOINT_INTERVAL: u64 = 4096;
+
 /// A party that answers by re-running its own execution.
 ///
-/// # Cost
+/// # Cost, and why this keeps checkpoints
 ///
-/// Each answer replays from the beginning, so a full bisection costs a party `O(n log n)`. A
-/// production worker would keep periodic checkpoints — the full state, not just the roots the
-/// trace commits to — and restart from the nearest one, bringing it to `O(n)`. That is an
-/// optimisation of one party's bookkeeping and changes nothing about the protocol, which is
-/// why it is not here.
+/// A bisection asks this party `log₂(n)` questions, each naming a step. Answering one by
+/// replaying from step 0 costs `O(n)`, so a naive party pays `O(n log n)` for a dispute — on
+/// top of the fact that it must answer with **Cairn's interpreter**, since a trace commitment
+/// covers machine state no host engine exposes ([ADR-0005]). The interpreter measures 37×–142×
+/// slower than the JIT the work was originally done on, so the multiplier on `n` is already
+/// large before `log n` is applied to it.
+///
+/// So this keeps periodic **full machine states** — not the roots the trace commits to, the
+/// actual states — and resumes from the nearest one at or below the requested step. That makes
+/// an answer cost at most one checkpoint interval and a dispute `O(n)`, which
+/// [ADR-0008](../../docs/adr/0008-a-dispute-costs-an-interpreted-re-execution.md) puts at about
+/// half of what a dispute costs a party.
+///
+/// # Why the states are recorded lazily
+///
+/// The obvious implementation runs the execution once up front to lay checkpoints down evenly,
+/// then answers from them. Measured, that made short disputes **slower**, and the reason is
+/// worth keeping: how much a naive replay costs depends on *where the parties diverged*, not on
+/// how long the execution was. A dispute that diverges in its first few instructions is
+/// answered by replaying a few instructions, `log₂(n)` times — already cheap — and a
+/// preparatory sweep charges it a full execution for nothing.
+///
+/// So checkpoints are recorded while answering, never ahead of it. This party never steps an
+/// instruction it would not have stepped anyway, which makes checkpointing a pure improvement
+/// instead of a bet on where the divergence is.
+///
+/// # Why this is safe to vary
+///
+/// Checkpointing is **invisible to the protocol**. It changes when this party does its work,
+/// never what it answers, because a resumed machine is a bit-exact copy of one that got there
+/// by stepping. Two honest workers with different budgets — or one with checkpointing disabled
+/// entirely — return identical roots for identical questions, and there is a test for exactly
+/// that. Keep it that way: if anything the coordinator can observe ever depends on the budget,
+/// this has become a protocol artefact and honest workers with different memory can be
+/// convicted for it.
+///
+/// [ADR-0005]: ../../docs/adr/0005-the-fast-path-cannot-snapshot.md
 pub struct Replay<'a> {
     image: &'a Image<'a>,
     input: Vec<u8>,
     limits: Limits,
+    /// Resume points, in increasing step order. Empty until the first answer.
+    checkpoints: Vec<(u64, Machine<'a>)>,
+    /// Steps between kept checkpoints. Doubles whenever the budget would be exceeded.
+    interval: u64,
+    /// Maximum resume points to hold. Zero replays from the start every time.
+    budget: usize,
 }
 
 impl<'a> Replay<'a> {
-    /// A party that will replay `image` on `input` to answer.
+    /// A party that will replay `image` on `input` to answer, keeping the default budget of
+    /// resume points.
     #[must_use]
     pub fn new(image: &'a Image<'a>, input: Vec<u8>, limits: Limits) -> Self {
+        Self::with_checkpoint_budget(image, input, limits, DEFAULT_CHECKPOINT_BUDGET)
+    }
+
+    /// The same, holding at most `budget` resume points.
+    ///
+    /// `0` disables checkpointing, which is slower by a factor of `log₂(n)` and answers
+    /// identically. Useful for memory-constrained workers, and for proving in tests that the
+    /// answers do not depend on this.
+    #[must_use]
+    pub fn with_checkpoint_budget(
+        image: &'a Image<'a>,
+        input: Vec<u8>,
+        limits: Limits,
+        budget: usize,
+    ) -> Self {
         Self {
             image,
             input,
             limits,
+            checkpoints: Vec::new(),
+            interval: 1,
+            budget,
+        }
+    }
+
+    /// Fold newly recorded states into the kept set, thinning if that exceeds the budget.
+    ///
+    /// Thinning drops every other checkpoint, which roughly doubles the spacing, so the
+    /// interval is doubled to match. Uneven spacing is tolerable — a resume point that is
+    /// closer than the interval only makes an answer cheaper.
+    fn absorb(&mut self, recorded: Vec<(u64, Machine<'a>)>) {
+        self.checkpoints.extend(recorded);
+        self.checkpoints.sort_by_key(|(at, _)| *at);
+        self.checkpoints.dedup_by_key(|(at, _)| *at);
+
+        while self.budget > 0 && self.checkpoints.len() > self.budget {
+            let mut keep = false;
+            self.checkpoints.retain(|_| {
+                keep = !keep;
+                keep
+            });
+            self.interval = self.interval.saturating_mul(2);
+        }
+    }
+
+    /// The latest recorded state at or before `step`, or a fresh machine.
+    fn resume_at(&self, step: u64) -> Option<(u64, Machine<'a>)> {
+        let found = self
+            .checkpoints
+            .iter()
+            .rev()
+            .find(|(at, _)| *at <= step)
+            .map(|(at, machine)| (*at, machine.clone()));
+        match found {
+            Some(resumed) => Some(resumed),
+            None => Machine::new(self.image, self.input.clone(), self.limits)
+                .ok()
+                .map(|machine| (0, machine)),
         }
     }
 }
 
 impl Claimant for Replay<'_> {
     fn root_at(&mut self, step: Step) -> Result<Option<Hash>, Absent> {
-        let Ok(mut machine) = Machine::new(self.image, self.input.clone(), self.limits) else {
+        // Spacing is derived from the largest step ever asked for, because this party does not
+        // know the execution's length and cannot ask. It only ever grows.
+        //
+        // Deriving it from the *first* question instead looks equivalent and is a trap: a
+        // bisection's opening exchange includes step 0, which would set the interval to 1 and
+        // clone the whole machine on every instruction. That is not a slow path, it is a hang.
+        if self.budget > 0 {
+            let implied = step.get() / self.budget as u64;
+            self.interval = self.interval.max(implied).max(MIN_CHECKPOINT_INTERVAL);
+        }
+
+        let Some((from, mut machine)) = self.resume_at(step.get()) else {
             return Ok(None);
         };
 
-        for _ in 0..step.get() {
+        // Recorded while replaying rather than in a preparatory pass over the whole execution.
+        // An eager sweep costs a full execution before answering anything, and a dispute whose
+        // divergence is early never needs it — measured, that made short disputes *slower*.
+        // Recording opportunistically means this party never steps an instruction it would not
+        // have stepped anyway.
+        let mut recorded = Vec::new();
+        let mut next_record = if self.budget == 0 {
+            u64::MAX
+        } else {
+            from.saturating_add(self.interval)
+        };
+
+        let result = loop {
+            if machine.steps() >= step.get() {
+                break Ok(Some(machine.commit().root()));
+            }
+            if machine.steps() >= next_record {
+                recorded.push((machine.steps(), machine.clone()));
+                next_record = machine.steps().saturating_add(self.interval);
+            }
             match machine.step() {
                 // Execution ended. If it ended exactly here, this is the final state;
                 // otherwise the requested step is past the end.
                 Ok(Progress::Finished) => {
-                    return Ok((machine.steps() == step.get()).then(|| machine.commit().root()));
+                    break Ok((machine.steps() == step.get()).then(|| machine.commit().root()));
                 }
                 Ok(_) => {}
                 // A trapped execution has no state at or after the trap.
-                Err(_) => return Ok(None),
+                Err(_) => break Ok(None),
             }
-        }
-        Ok(Some(machine.commit().root()))
+        };
+
+        self.absorb(recorded);
+        result
     }
 }
 
@@ -917,6 +1063,112 @@ mod tests {
                 snapshot.step
             );
         }
+    }
+
+    #[test]
+    fn checkpointing_changes_speed_and_nothing_else() {
+        // The property that makes checkpointing safe. A party's answers must not depend on how
+        // much memory it chose to spend, or two honest workers with different budgets would
+        // give different roots for the same question and the protocol would convict one of
+        // them. Budget 0 replays from step 0 every time; the others resume from a checkpoint,
+        // and 1 forces the halve-and-double path to run repeatedly.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+
+        let mut probe = Machine::new(&image, b"budget".to_vec(), Limits::default()).unwrap();
+        let total = probe.run().unwrap().steps;
+
+        let mut reference =
+            Replay::with_checkpoint_budget(&image, b"budget".to_vec(), Limits::default(), 0);
+        let expected: Vec<_> = (0..=total + 2)
+            .map(|step| reference.root_at(Step::new(step)).unwrap())
+            .collect();
+
+        for budget in [1usize, 2, 3, 7, 32, 1024] {
+            let mut party = Replay::with_checkpoint_budget(
+                &image,
+                b"budget".to_vec(),
+                Limits::default(),
+                budget,
+            );
+            for (step, want) in expected.iter().enumerate() {
+                assert_eq!(
+                    party.root_at(Step::new(step as u64)).unwrap(),
+                    *want,
+                    "budget {budget} answered differently at step {step}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoints_stay_within_their_budget() {
+        // Otherwise a long execution would hold one full machine state per interval and a
+        // worker would run out of memory rather than run slowly.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+
+        for budget in [1usize, 2, 5, 16] {
+            let mut party =
+                Replay::with_checkpoint_budget(&image, b"hold".to_vec(), Limits::default(), budget);
+            let _ = party.root_at(Step::new(1)).unwrap();
+            assert!(
+                party.checkpoints.len() <= budget,
+                "budget {budget} kept {} checkpoints",
+                party.checkpoints.len()
+            );
+        }
+    }
+
+    #[test]
+    fn a_resumed_answer_costs_less_than_replaying_from_zero() {
+        // The point of the exercise. Counted in instructions stepped rather than in wall-clock,
+        // so it says something reproducible about the algorithm rather than about this machine.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+
+        let mut probe = Machine::new(&image, b"cost".to_vec(), Limits::default()).unwrap();
+        let total = probe.run().unwrap().steps;
+        assert!(total > 8, "the fixture needs enough steps to bisect over");
+
+        let mut party =
+            Replay::with_checkpoint_budget(&image, b"cost".to_vec(), Limits::default(), 8);
+        let _ = party.root_at(Step::new(total)).unwrap();
+
+        // Every answer starts from a checkpoint no further back than one interval.
+        let interval = party.interval;
+        for step in 0..=total {
+            let (from, _) = party.resume_at(step).unwrap();
+            assert!(
+                step - from < interval.max(1) * 2,
+                "answering step {step} would replay from {from}, more than an interval back"
+            );
+        }
+    }
+
+    #[test]
+    fn a_query_at_step_zero_does_not_collapse_the_interval() {
+        // A bisection's opening exchange asks about step 0. An earlier version derived the
+        // checkpoint interval from the first question it saw, which made that interval 1 and
+        // cloned the entire machine on every instruction of every later answer. The benchmark
+        // stopped finishing.
+        let module = canonical(ECHO);
+        let image = crate::engine::image::decode(&module).unwrap();
+
+        let mut probe = Machine::new(&image, b"zero".to_vec(), Limits::default()).unwrap();
+        let total = probe.run().unwrap().steps;
+
+        let mut party =
+            Replay::with_checkpoint_budget(&image, b"zero".to_vec(), Limits::default(), 4);
+        let _ = party.root_at(Step::ZERO).unwrap();
+        let _ = party.root_at(Step::new(total)).unwrap();
+
+        assert!(
+            party.interval > 1,
+            "interval collapsed to {} after a query at step 0",
+            party.interval
+        );
+        assert!(party.checkpoints.len() <= 4);
     }
 
     // --- adjudication ------------------------------------------------------------------

@@ -762,48 +762,128 @@ fn bisection_cost() {
     // The accumulator folds in the input length, so two parties given different inputs
     // genuinely diverge. An earlier version read the input and then ignored it, which made
     // both parties compute the same thing and reported "no dispute" for every row.
-    let workload = |iterations: u32| {
+    //
+    // `early` decides *when* they diverge, which turns out to matter more than execution
+    // length for what a dispute costs a party. Reading the input first makes their states
+    // differ within a handful of instructions; reading it last keeps them identical until the
+    // end. Both are realistic — a corrupted result usually diverges early, a fabricated one
+    // late — and a benchmark that only measured one would report a fraction of the story.
+    let workload = |iterations: u32, early: bool| {
+        let read = "(local.set $n (call $input (i32.const 0) (i32.const 0)))";
+        let loop_body = format!(
+            r#"(block $done
+                 (loop $again
+                   (br_if $done (i32.ge_u (local.get $i) (i32.const {iterations})))
+                   (i32.store (i32.const 8)
+                     (i32.add (i32.load (i32.const 8)) (local.get $i)))
+                   (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                   (br $again)))"#
+        );
+        let body = if early {
+            format!("{read} {loop_body}")
+        } else {
+            format!("{loop_body} {read}")
+        };
         format!(
             r#"(module
                  (import "cairn" "input"  (func $input  (param i32 i32) (result i32)))
                  (import "cairn" "output" (func $output (param i32 i32)))
                  (memory (export "memory") 1 4)
                  (func (export "cairn_run") (local $i i32) (local $n i32)
-                   (local.set $n (call $input (i32.const 0) (i32.const 0)))
-                   (block $done
-                     (loop $again
-                       (br_if $done (i32.ge_u (local.get $i) (i32.const {iterations})))
-                       (i32.store (i32.const 8)
-                         (i32.add (i32.load (i32.const 8))
-                                  (i32.mul (local.get $i) (local.get $n))))
-                       (local.set $i (i32.add (local.get $i) (i32.const 1)))
-                       (br $again)))
+                   {body}
+                   (i32.store (i32.const 8)
+                     (i32.add (i32.load (i32.const 8)) (local.get $n)))
                    (call $output (i32.const 8) (i32.const 4))))"#
         )
     };
 
-    println!("| execution length | bisection rounds | log2(length) |");
-    println!("|---:|---:|---:|");
-    for iterations in [1_000u32, 10_000, 100_000] {
-        let module = canonical(&workload(iterations), Config::default());
+    println!(
+        "| diverge | execution length | bisection rounds | log2(length) | party's time, replaying from 0 | with checkpoints |"
+    );
+    println!("|---|---:|---:|---:|---:|---:|");
+    for (early, iterations) in [
+        (true, 1_000u32),
+        (true, 10_000),
+        (true, 100_000),
+        (false, 1_000),
+        (false, 10_000),
+        (false, 100_000),
+    ] {
+        let module = canonical(&workload(iterations, early), Config::default());
         let image = image::decode(&module).expect("should decode");
 
         let mut probe = Machine::new(&image, b"a".to_vec(), Limits::default()).unwrap();
         let length = Step::new(probe.run().unwrap().steps);
 
-        let mut first = Replay::new(&image, b"a".to_vec(), Limits::default());
-        let mut second = Replay::new(&image, b"bb".to_vec(), Limits::default());
+        // Timed twice: once with each party replaying from step 0 for every answer, once with
+        // the default checkpoint budget. The verdict must be identical either way — that is
+        // asserted rather than assumed, because a checkpoint that changed an answer would be a
+        // protocol bug wearing a performance optimisation's clothes.
+        let mut naive_time = Duration::MAX;
+        let mut kept_time = Duration::MAX;
+        let mut naive_verdict = None;
+        let mut kept_verdict = None;
 
-        match dispute::resolve(&mut first, &mut second, length) {
-            Ok(verdict) => println!(
-                "| {} | {} | {:.0} |",
+        for _ in 0..3 {
+            let mut first =
+                Replay::with_checkpoint_budget(&image, b"a".to_vec(), Limits::default(), 0);
+            let mut second =
+                Replay::with_checkpoint_budget(&image, b"bb".to_vec(), Limits::default(), 0);
+            let start = Instant::now();
+            let outcome = dispute::resolve(&mut first, &mut second, length);
+            naive_time = naive_time.min(start.elapsed());
+            naive_verdict = outcome
+                .ok()
+                .map(|v| (v.rounds, v.divergence, v.first_claim, v.second_claim));
+
+            let mut first = Replay::new(&image, b"a".to_vec(), Limits::default());
+            let mut second = Replay::new(&image, b"bb".to_vec(), Limits::default());
+            let start = Instant::now();
+            let outcome = dispute::resolve(&mut first, &mut second, length);
+            kept_time = kept_time.min(start.elapsed());
+            kept_verdict = outcome
+                .ok()
+                .map(|v| (v.rounds, v.divergence, v.first_claim, v.second_claim));
+        }
+
+        assert_eq!(
+            naive_verdict, kept_verdict,
+            "checkpointing changed the verdict, which makes it a protocol change"
+        );
+
+        match kept_verdict {
+            Some((rounds, divergence, ..)) => println!(
+                "| {} (step {}) | {} | {} | {:.0} | {:.1?} | **{:.1?}** ({:.1}×) |",
+                if early { "early" } else { "late" },
+                divergence.get(),
                 length.get(),
-                verdict.rounds,
-                (length.get() as f64).log2()
+                rounds,
+                (length.get() as f64).log2(),
+                naive_time,
+                kept_time,
+                ratio(naive_time, kept_time),
             ),
-            Err(e) => println!("| {} | (no dispute: {e}) | |", length.get()),
+            None => println!(
+                "| {} | {} | (no dispute) | | | |",
+                if early { "early" } else { "late" },
+                length.get()
+            ),
         }
     }
+    println!(
+        "\nThe rounds column is the coordinator's cost and does not grow with length. The two \
+         time columns are one **party's**, which is a different and much larger thing — see \
+         [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md). Checkpointing is \
+         invisible to the protocol: the verdict is asserted identical with and without it."
+    );
+    println!(
+        "\n**What a dispute costs a party depends on where the divergence is, not on how long \
+         the execution was.** An early divergence is answered by replaying a few instructions \
+         `log₂(n)` times and was never expensive; checkpoints buy it nothing, which is why they \
+         are recorded while answering rather than laid down in advance. A late divergence is \
+         where the naive `O(n log n)` bites, and where resuming from a checkpoint earns its \
+         memory."
+    );
 }
 
 /// How large a witness is, which is what bounds an adjudicator's work.
