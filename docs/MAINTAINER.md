@@ -143,9 +143,13 @@ commit the number of pages; `state::hash_memory` binds it. This is load-bearing:
 sizes. If you use a `PageTree` root directly in a commitment anywhere else, `memory.grow`
 becomes invisible to the protocol.
 
-**6. `cairn.charge` is reserved.** A submitted module that imports it is rejected. It is the
-metering hook `canon.rs` injects; a module that could call it could forge its own
-instruction count.
+**6. `cairn.charge` and `cairn_fuel` are reserved.** A submitted module importing the first or
+exporting the second is rejected. They are the two ways `canon.rs` writes a charge — a host
+call, or an addition into a counter global the module exports — and a module that could reach
+either could forge the count of its own execution. The rule has a second half that is easy to
+lose: the counter global is **appended past the module's own index space**, so a validated
+module cannot name it even by accident. Keep it that way; the day something inserts a global
+instead of appending one, every `global.get` in every workload shifts by one.
 
 **7. The differential gate is not advisory.** It runs in CI and compares Cairn's interpreter
 against **two** independent engines on identical instrumented bytes: `wasmi`, which interprets,
@@ -252,6 +256,22 @@ confidence.
 
 If you take one habit from this repository, take that one: before optimising a number, check
 who pays it.
+
+**Then the optimisation was finally built, and it did the opposite of what three ADRs had
+assumed ([ADR-0009](adr/0009-metering-through-a-global-the-engines-disagree.md)).** Metering
+through an exported counter global instead of a host call is **3×–6× faster on a compiler and
+9%–26% slower in the interpreter** — and the interpreter is the only engine that runs a metered
+module, so `Config::dispute_path()` keeps the host call and disputes do not get cheaper. Two
+smaller findings on the way there, both of which would have been caught by writing the four
+instructions out rather than describing them: WebAssembly has no `global.tee`, so the proposed
+"three-instruction threshold test" is eight; and the threshold test is unnecessary, because
+whoever runs the module can read the counter without being told.
+
+What the change *does* buy is not a saving but a capability: metering on a compiler falls from
++252%…+563% to +7%…+84%, so **an engine Cairn does not control can now report how much work it
+did.** Nothing consumes that yet — `Config::honest_path()` still meters nothing, because a cost
+paid on every unit needs a consumer — but it is the answer to the first question a coordinator
+will ask, recorded while the measurement is fresh.
 
 **The thing to be careful about here is `canon::escape_site`.** A missing entry is not a
 performance regression — it makes two honest workers disagree and the protocol convicts one of

@@ -44,7 +44,10 @@ contract. It is small and deserves one page:
 
 - Imports come from module `cairn` only. `input(ptr: i32, len: i32) -> i32` and
   `output(ptr: i32, len: i32)` are the whole interface. `charge` is **reserved** — the
-  instrumentation pass injects it, and a submitted module importing it is rejected.
+  instrumentation pass injects it, and a submitted module importing it is rejected. So is the
+  export name `cairn_fuel`, which is the counter the pass appends under the global metering
+  encoding ([ADR-0009](adr/0009-metering-through-a-global-the-engines-disagree.md)); a module
+  exporting it is rejected whatever it names.
 - Admitted features are exactly `validate::admitted_features()`: mutable globals, sign
   extension, saturating float-to-int, multi-value, bulk memory, floats. Everything else —
   threads, SIMD, reference types — is refused, and each refusal has a determinism reason
@@ -152,16 +155,44 @@ your time measuring the validator.
 
 ---
 
-### 6b · Make metering cheap — for the dispute path, and no longer urgent · **L** · `help-wanted`
+### 6b · ~~Make metering cheap~~ — **done, and it does not do what this issue wanted** · `closed`
 
-> **Read [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md) before starting.**
-> The +505% figure below is real and nobody pays it: nothing runs the fully instrumented module
-> on a JIT, because a trace commitment needs machine state no host engine exposes. A challenged
-> party re-executes under Cairn's **interpreter**, where metering costs 18%–41% — and that is
-> dwarfed by the interpreter being 37×–142× slower than the JIT in the first place. The change
-> is still correct and still worth making. It is not the highest-value work any more.
+> Built, measured, and recorded in
+> [ADR-0009](adr/0009-metering-through-a-global-the-engines-disagree.md). Two things in the
+> text below turned out to be wrong, and the third is the reason the work was worth doing
+> anyway.
 >
-> **If you want the change that actually reduces dispute cost, it is issue 6c.**
+> **"Three arithmetic instructions on the common path" is not achievable.** WebAssembly has
+> `local.tee` and no `global.tee`, so accumulate-and-compare is eight instructions. **And the
+> threshold test is not needed at all** — it existed to decide when to enter the host, and the
+> host was being entered to enforce a ceiling and schedule snapshots, but whoever executes the
+> module can already read the count. Cairn's interpreter intercepts the write; a host engine
+> does not need to, because under ADR-0005 it produces no trace and its ceiling is its own
+> affair. The shipped encoding is `global.get; i64.const N; i64.add; global.set` — four
+> instructions, no branch, no call.
+>
+> **It does not make a dispute cheaper. It makes one dearer.** Measured: **1.14×–1.25× slower
+> in the interpreter**, which is the only engine that runs a metered module, and **2×–6× faster
+> on wasmtime**, where nothing runs one. `Config::dispute_path()` therefore keeps the host call.
+> The issue asked for the opposite of what the measurement supports, which is what measuring is
+> for.
+>
+> **What it does buy is a capability, not a saving.** An engine Cairn does not control can now
+> report how much work it did — run the module, read the exported `cairn_fuel` global. Under the
+> host-call encoding that was unavailable at any price a volunteer would accept. Nothing consumes
+> it yet, so `Config::honest_path()` still meters nothing; the day the coordinator wants to
+> account for contributed work rather than count completed units, this is how.
+
+<details><summary>Original issue</summary>
+
+### Make metering cheap — for the dispute path, and no longer urgent · **L** · `help-wanted`
+
+**Read [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md) before starting.**
+The +505% figure below is real and nobody pays it: nothing runs the fully instrumented module
+on a JIT, because a trace commitment needs machine state no host engine exposes. A challenged
+party re-executes under Cairn's **interpreter**, where metering costs 18%–41% — and that is
+dwarfed by the interpreter being 37×–142× slower than the JIT in the first place. The change
+is still correct and still worth making. It is not the highest-value work any more.
 
 `canon.rs` charges fuel by injecting `i32.const N; call $charge` at every basic block. In the
 interpreter that costs 18%–41%. **On wasmtime it costs +484% to +502%**
@@ -180,6 +211,8 @@ a submitted module must not be able to touch it — the same reservation rule th
 **Done when:** the JIT column in `docs/benchmarks.md` drops, the differential gate is still
 green across all three engines, and ADR-0007 gains a follow-up reporting the result **whether
 or not it improved**.
+
+</details>
 
 ---
 

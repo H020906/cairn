@@ -27,7 +27,9 @@ use wasmparser::{
 };
 
 use crate::state::Value;
-use crate::validate::{ENTRY_POINT, HOST_CHARGE, HOST_INPUT, HOST_MODULE, HOST_OUTPUT};
+use crate::validate::{
+    ENTRY_POINT, FUEL_EXPORT, HOST_CHARGE, HOST_INPUT, HOST_MODULE, HOST_OUTPUT,
+};
 
 /// Ceiling on the number of locals in one function, after run-length expansion.
 ///
@@ -163,6 +165,12 @@ pub struct Image<'a> {
     pub entry: u32,
     /// Function index of `charge`, which the interpreter intercepts rather than calls.
     pub charge: u32,
+    /// Global index of the fuel counter, when the module meters through one.
+    ///
+    /// `None` under any other [`Metering`](crate::canon::Metering). The interpreter intercepts
+    /// writes to this global exactly as it intercepts calls to `charge` — for the same reason,
+    /// which is that the count of an execution is not the executing program's to choose.
+    pub fuel_global: Option<u32>,
 }
 
 /// Why a module could not be decoded.
@@ -355,6 +363,7 @@ pub fn decode(module: &[u8]) -> Result<Image<'_>, ImageError> {
     let mut table: Option<TableSpec> = None;
     let mut entry: Option<u32> = None;
     let mut charge: Option<u32> = None;
+    let mut fuel_global: Option<u32> = None;
     let mut defined_types: Vec<u32> = Vec::new();
     let mut bodies = 0usize;
 
@@ -446,6 +455,10 @@ pub fn decode(module: &[u8]) -> Result<Image<'_>, ImageError> {
                     let export = parse(export)?;
                     if export.name == ENTRY_POINT && export.kind == wasmparser::ExternalKind::Func {
                         entry = Some(export.index);
+                    }
+                    if export.name == FUEL_EXPORT && export.kind == wasmparser::ExternalKind::Global
+                    {
+                        fuel_global = Some(export.index);
                     }
                 }
             }
@@ -542,6 +555,7 @@ pub fn decode(module: &[u8]) -> Result<Image<'_>, ImageError> {
         data,
         entry: entry.ok_or(ImageError::NoEntryPoint)?,
         charge: charge.ok_or(ImageError::NotInstrumented)?,
+        fuel_global,
     })
 }
 
@@ -575,7 +589,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 
     use super::*;
-    use crate::canon::{self, Canonicalization, Config};
+    use crate::canon::{self, Canonicalization, Config, Metering};
 
     /// Assemble, then instrument, exactly as a coordinator would.
     fn canonical(text: &str, config: Config) -> Vec<u8> {
@@ -589,7 +603,7 @@ mod tests {
         canonical(
             text,
             Config {
-                meter_fuel: false,
+                meter: Metering::Off,
                 canonicalize: Canonicalization::Never,
             },
         )

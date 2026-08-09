@@ -21,8 +21,10 @@
 //!   the **honest path**, because it is what makes two honest workers agree at all. After
 //!   ADR-0005 it is the only cost most workloads pay, and the only large one any workload
 //!   pays.
-//! - **Fuel metering** — two instructions per basic block, and what makes an execution
-//!   addressable. Runs **only on disputed units** now.
+//! - **Fuel metering** — what makes an execution addressable. Runs **only on disputed units**
+//!   now, and comes in two encodings that cost opposite amounts on the two kinds of engine:
+//!   two instructions plus a host call per basic block, or four instructions into an exported
+//!   counter. See *Two metering encodings, two engines*.
 //! - **Snapshots** — hashing dirty pages every `2^k` instructions. Disputed units only, and
 //!   tunable by `k`, which no longer trades against honest-path speed.
 //!
@@ -40,10 +42,12 @@
 //! runs during arbitration. One section measures wasmtime, a real optimising compiler, and it
 //! is the section that matters most, because a volunteer runs a compiler.
 //!
-//! They do not agree. The honest path is free on both. Fuel metering costs 18%–41% in the
-//! interpreter and **five to six times** on the compiler, because a host call is cheap next to
-//! interpreted arithmetic and expensive next to compiled arithmetic. See
-//! [ADR-0007](../../docs/adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md).
+//! They do not agree. The honest path is free on both. Fuel metering through a host call costs
+//! 18%–41% in the interpreter and **five to six times** on the compiler, because a host call is
+//! cheap next to interpreted arithmetic and expensive next to compiled arithmetic
+//! ([ADR-0007](../../docs/adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)) —
+//! and metering through a global inverts that, which is
+//! [ADR-0009](../../docs/adr/0009-metering-through-a-global-the-engines-disagree.md).
 //!
 //! Run with `cargo bench`.
 
@@ -60,7 +64,7 @@
 
 use std::time::{Duration, Instant};
 
-use cairn_runtime::canon::{self, Canonicalization, Config};
+use cairn_runtime::canon::{self, Canonicalization, Config, Metering};
 use cairn_runtime::dispute::{self, Replay, Step};
 use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
@@ -339,14 +343,14 @@ fn measure(name: &'static str, source: &str) -> Measurement {
     let bare_module = canonical(
         source,
         Config {
-            meter_fuel: false,
+            meter: Metering::Off,
             canonicalize: Canonicalization::Never,
         },
     );
     let metered_module = canonical(
         source,
         Config {
-            meter_fuel: true,
+            meter: Metering::HostCall,
             canonicalize: Canonicalization::Never,
         },
     );
@@ -357,7 +361,7 @@ fn measure(name: &'static str, source: &str) -> Measurement {
     let everywhere_module = canonical(
         source,
         Config {
-            meter_fuel: false,
+            meter: Metering::Off,
             canonicalize: Canonicalization::Everywhere,
         },
     );
@@ -563,6 +567,7 @@ fn main() {
 
     noise_floor(&measurements);
     on_a_jit(&measurements);
+    metering_encodings();
 
     println!("\n## The two paths, after ADR-0005\n");
     println!(
@@ -647,7 +652,7 @@ fn on_a_jit(measurements: &[Measurement]) {
             canonical(
                 source,
                 Config {
-                    meter_fuel: false,
+                    meter: Metering::Off,
                     canonicalize: Canonicalization::Never,
                 },
             ),
@@ -679,6 +684,106 @@ fn on_a_jit(measurements: &[Measurement]) {
          is startling and because it is **not a cost anyone pays**: nothing runs the fully \
          instrumented module on a JIT. See \
          [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md)."
+    );
+}
+
+/// The two ways a module can count its own instructions, on both kinds of engine.
+///
+/// `HostCall` charges with `i32.const N; call $charge`: two instructions and a host call per
+/// basic block, the arithmetic done by the host. `Global` charges with `global.get; i64.const
+/// N; i64.add; global.set` into a counter the module exports: four instructions and no call.
+///
+/// The two produce identical fuel totals, identical exhaustion points and identical snapshot
+/// schedules — `tests/metering.rs` pins that — so this table is purely about price. It is
+/// worth its own section because the answer is different on the two engines, and because the
+/// issue this work came from assumed one number where there are two.
+fn metering_encodings() {
+    println!("\n## Two metering encodings, two engines\n");
+    println!(
+        "Both charge the same amounts at the same points; only the encoding differs. \
+         `HostCall` is two instructions and a host call per basic block, `Global` is four \
+         instructions into an exported counter and no call. Canonicalization is off in every \
+         column so that nothing else moves.\n"
+    );
+    println!(
+        "| workload | instructions: none / host call / global | interpreter: host call | global | **global ÷ host call** | JIT: host call | global | **global ÷ host call** |"
+    );
+    println!("|---|---|---:|---:|---:|---:|---:|---:|");
+
+    // Every column is timed inside one `race`, including the unmetered baseline, so the
+    // "what does metering cost at all" figures below are comparable to each other rather than
+    // to a number from a different group.
+    let mut costs = Vec::new();
+
+    for (name, source) in WORKLOADS {
+        let modules: Vec<Vec<u8>> = [Metering::Off, Metering::HostCall, Metering::Global]
+            .into_iter()
+            .map(|meter| {
+                canonical(
+                    source,
+                    Config {
+                        meter,
+                        canonicalize: Canonicalization::Never,
+                    },
+                )
+            })
+            .collect();
+
+        let interpreted = race(
+            &modules
+                .iter()
+                .map(|module| Variant {
+                    module: module.clone(),
+                    interval: NO_SNAPSHOTS,
+                })
+                .collect::<Vec<_>>(),
+        );
+        let compiled = race_jit(&modules);
+
+        println!(
+            "| {} | {} / {} / {} | {:.1?} | {:.1?} | **{:.2}×** | {:.1?} | {:.1?} | **{:.2}×** |",
+            name,
+            interpreted[0].steps,
+            interpreted[1].steps,
+            interpreted[2].steps,
+            interpreted[1].time,
+            interpreted[2].time,
+            ratio(interpreted[2].time, interpreted[1].time),
+            compiled[1],
+            compiled[2],
+            ratio(compiled[2], compiled[1]),
+        );
+
+        costs.push((
+            name,
+            ratio(compiled[1], compiled[0]) - 1.0,
+            ratio(compiled[2], compiled[0]) - 1.0,
+        ));
+    }
+
+    println!(
+        "\nRead the two ratio columns against each other. A host call is cheap next to \
+         interpreted arithmetic and ruinous next to compiled arithmetic, so the encoding that \
+         wins depends entirely on who is running the module — and under \
+         [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) the metered module is run by \
+         Cairn's interpreter and nothing else. See \
+         [ADR-0009](adr/0009-metering-through-a-global-the-engines-disagree.md)."
+    );
+
+    println!("\nWhat metering costs a compiler, against the same module unmetered:\n");
+    println!("| workload | host call | global |");
+    println!("|---|---:|---:|");
+    for (name, by_call, by_global) in &costs {
+        println!(
+            "| {} | {:+.0}% | {:+.0}% |",
+            name,
+            by_call * 100.0,
+            by_global * 100.0
+        );
+    }
+    println!(
+        "\nThis is the number that decides whether an engine Cairn does not control could ever \
+         report how much work it did."
     );
 }
 
@@ -722,7 +827,7 @@ fn snapshot_interval_sweep() {
     let module = canonical(
         MEMORY_SWEEP,
         Config {
-            meter_fuel: true,
+            meter: Metering::HostCall,
             canonicalize: Canonicalization::Never,
         },
     );

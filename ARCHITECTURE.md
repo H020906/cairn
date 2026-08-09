@@ -193,7 +193,7 @@ closes each one:
 | Threads / shared memory / atomics | Feature disabled; a unit is single-threaded by definition |
 | Host clock, entropy, filesystem, network | Not reachable — the host interface exposes none of them |
 | Memory-growth failure depends on host RAM | Fixed memory ceiling per unit, declared in the manifest; OOM is deterministic |
-| Divergent instruction counting | Explicit fuel metering, counted identically on both paths |
+| Divergent instruction counting | Explicit fuel metering, baked into the module rather than counted by the engine. Only the dispute path runs it, since only that path commits to a trace (ADR-0005) |
 
 **The top technical risk in this project** is that the fast path (the browser's native WASM
 engine) and the slow path (our instrumented interpreter) disagree on some edge case. If

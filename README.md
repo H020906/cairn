@@ -121,6 +121,16 @@ Cairn's interpreter, which is 37×–142× slower than the JIT they did the work
 price of a dispute, it falls on the parties rather than the coordinator, and it puts a hard
 budget on how often disputes may happen — **below roughly 1 in 4,000 units.**
 
+And a sixth, from finally building the fix the third and fourth had been circling. Metering
+through a counter global instead of a host call is **3×–6× faster on a compiler and 9%–26%
+slower in the interpreter** — and the interpreter is the only engine that runs a metered module,
+so the change makes disputes *dearer*, not cheaper, and the dispute path keeps the host call
+([ADR-0009](docs/adr/0009-metering-through-a-global-the-engines-disagree.md)). What it buys is
+something nobody asked for and everybody will want: on a compiler, metering falls from **+540%
+to +8%**, which means **an engine Cairn does not control can now report how much work it did** —
+run the module, read the exported counter. That was unavailable at any price a volunteer would
+accept.
+
 **The benchmark measures its own error rather than asserting one**, by timing pairs of
 configurations that compile to byte-identical modules. When that error exceeds the effect, the
 figure prints as *not resolved* instead of as a result — on one earlier run it reached 148%,

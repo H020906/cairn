@@ -643,6 +643,17 @@ impl<'a> Machine<'a> {
         self.meter.consumed()
     }
 
+    /// The module's globals, in index order.
+    ///
+    /// A read-only view, for inspection rather than control. Under
+    /// [`Metering::Global`](crate::canon::Metering::Global) one of these is the fuel counter —
+    /// see [`Image::fuel_global`](crate::engine::image::Image::fuel_global) — which is how a
+    /// caller reads a total out of a machine the way a host engine reads it out of an instance.
+    #[must_use]
+    pub fn globals(&self) -> &[Value] {
+        &self.globals
+    }
+
     /// Instructions executed.
     ///
     /// This is the coordinate dispute bisection addresses states by, because it names exactly
@@ -1157,6 +1168,9 @@ impl<'a> Machine<'a> {
                     .globals
                     .get_mut(*global_index as usize)
                     .ok_or(Trap::StackUnderflow)? = value;
+                if self.image.fuel_global == Some(*global_index) {
+                    return self.charge_to(value);
+                }
             }
 
             // --- memory -------------------------------------------------------------------
@@ -1402,6 +1416,47 @@ impl<'a> Machine<'a> {
             Charge::Continue => Ok(Progress::Continued),
             Charge::SnapshotDue { at } => Ok(Progress::Snapshot { at }),
             Charge::Exhausted { .. } => Err(Trap::OutOfFuel),
+        }
+    }
+
+    /// The same meter, driven by a write to the counter global instead of a host call.
+    ///
+    /// The module has already stored the new total by the time this runs, so what to charge is
+    /// the difference from what the meter held. The two must not drift: the global is hashed
+    /// into every state commitment (it is an ordinary global as far as [`crate::state`] is
+    /// concerned) while the meter is what decides exhaustion and snapshots, so a discrepancy
+    /// would make two honest workers commit different roots for the same execution. Every exit
+    /// from here leaves them equal, including the exhausted one.
+    ///
+    /// A write that *lowers* the total is a module rewriting the count of its own execution.
+    /// It cannot arise from [`crate::canon`] and it cannot arise from a submitted module, whose
+    /// index space stops short of this global — so it means a forged image, and it is refused
+    /// the same way reaching `charge` directly is.
+    fn charge_to(&mut self, total: Value) -> Result<Progress, Trap> {
+        let Value::I64(total) = total else {
+            return Err(Trap::TypeMismatch);
+        };
+        let total = total as u64;
+        let consumed = self.meter.consumed().get();
+        let instructions = total.checked_sub(consumed).ok_or(Trap::Unreachable)?;
+
+        match self.meter.charge(instructions) {
+            Charge::Continue => Ok(Progress::Continued),
+            Charge::SnapshotDue { at } => Ok(Progress::Snapshot { at }),
+            Charge::Exhausted { .. } => {
+                self.restore_fuel_global();
+                Err(Trap::OutOfFuel)
+            }
+        }
+    }
+
+    /// Put the counter global back in step with the meter after a refused charge.
+    fn restore_fuel_global(&mut self) {
+        let consumed = self.meter.consumed().get();
+        if let Some(index) = self.image.fuel_global {
+            if let Some(slot) = self.globals.get_mut(index as usize) {
+                *slot = Value::I64(consumed as i64);
+            }
         }
     }
 

@@ -23,7 +23,9 @@
 //!    remapped accordingly.
 //! 2. **Meters fuel.** Each maximal straight-line run of instructions is charged for on
 //!    entry, so the running instruction count is exact while the counter is touched once per
-//!    run rather than once per instruction.
+//!    run rather than once per instruction. [`Metering`] chooses how the charge is written:
+//!    through the host call, or into a counter global the module exports — same amounts, same
+//!    points, very different prices depending on who executes the result.
 //! 3. **Canonicalizes NaN** after every floating-point operation whose NaN payload the
 //!    specification leaves to the implementation.
 //! 4. **Drops custom sections.** The canonical module's hash is part of the work unit's
@@ -38,7 +40,7 @@ use wasm_encoder::reencode::{Reencode, RoundtripReencoder};
 use wasm_encoder::{Instruction, ValType as EncValType};
 use wasmparser::{CompositeInnerType, Operator, Payload};
 
-use crate::validate::{HOST_CHARGE, HOST_MODULE};
+use crate::validate::{FUEL_EXPORT, HOST_CHARGE, HOST_MODULE};
 
 /// The canonical quiet NaN for `f32`: sign clear, exponent all ones, payload MSB set.
 const CANONICAL_NAN_F32: u32 = 0x7fc0_0000;
@@ -78,6 +80,43 @@ pub enum Canonicalization {
     AtEscapes,
 }
 
+/// How a module accounts for the instructions it executes.
+///
+/// Both encodings charge the same amounts at the same points and produce the same fuel totals,
+/// exhaustion points and snapshot schedule. They differ only in what the instrumented module
+/// has to execute to say so, and that difference is worth an enum because it is enormous and
+/// it points in opposite directions on the two kinds of engine — see
+/// [ADR-0009](../../docs/adr/0009-metering-through-a-global-the-engines-disagree.md).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Metering {
+    /// None. The honest path, which commits to nothing and therefore counts nothing.
+    #[default]
+    Off,
+
+    /// `i32.const N; call $charge` — two instructions and a host call per basic block.
+    ///
+    /// The host does the arithmetic, so the module carries no counter and the interpreter's
+    /// meter is the only copy of it.
+    HostCall,
+
+    /// `global.get; i64.const N; i64.add; global.set` — four instructions and no host call.
+    ///
+    /// The count lives in a module-local mutable global exported as
+    /// [`FUEL_EXPORT`](crate::validate::FUEL_EXPORT), which is what lets an engine Cairn does
+    /// not control report a total: run the module, read the global. Cairn's interpreter
+    /// intercepts writes to it so that exhaustion and snapshots behave exactly as under
+    /// [`HostCall`](Metering::HostCall).
+    Global,
+}
+
+impl Metering {
+    /// Does the module count at all?
+    #[must_use]
+    pub const fn is_on(self) -> bool {
+        !matches!(self, Self::Off)
+    }
+}
+
 /// Which parts of the pass to apply.
 ///
 /// Separable so the benchmark suite can measure what each costs — ADR-0001's efficiency claim
@@ -85,11 +124,11 @@ pub enum Canonicalization {
 /// should believe. It was not small.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Config {
-    /// Insert fuel accounting. Without it there is no trace coordinate system.
+    /// How to account for instructions. Without accounting there is no trace coordinate system.
     ///
     /// Needed only on the dispute path, since [ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md)
     /// moved trace production there.
-    pub meter_fuel: bool,
+    pub meter: Metering,
     /// How aggressively to canonicalize NaNs.
     pub canonicalize: Canonicalization,
 }
@@ -106,7 +145,7 @@ impl Config {
     #[must_use]
     pub const fn honest_path() -> Self {
         Self {
-            meter_fuel: false,
+            meter: Metering::Off,
             canonicalize: Canonicalization::AtEscapes,
         }
     }
@@ -115,7 +154,7 @@ impl Config {
     #[must_use]
     pub const fn dispute_path() -> Self {
         Self {
-            meter_fuel: true,
+            meter: Metering::HostCall,
             canonicalize: Canonicalization::Everywhere,
         }
     }
@@ -180,6 +219,8 @@ impl std::error::Error for Error {}
 pub fn instrument(module: &[u8], config: Config) -> Result<Vec<u8>, Error> {
     let facts = survey(module)?;
 
+    let fuel_global = u32::try_from(facts.global_widths.len()).unwrap_or(u32::MAX);
+
     let mut pass = Instrumenter {
         config,
         imported_funcs: facts.imported_funcs,
@@ -188,9 +229,12 @@ pub fn instrument(module: &[u8], config: Config) -> Result<Vec<u8>, Error> {
         type_params: facts.type_params,
         function_types: facts.function_types,
         global_widths: facts.global_widths,
+        fuel_global,
         bodies_seen: 0,
         had_import_section: facts.had_import_section,
         emitted_import_section: false,
+        had_global_section: facts.had_global_section,
+        emitted_global_section: false,
     };
 
     let mut out = wasm_encoder::Module::new();
@@ -220,6 +264,7 @@ struct Survey {
     /// the canonicalization sequence has to know which width to emit.
     global_widths: Vec<Option<FloatWidth>>,
     had_import_section: bool,
+    had_global_section: bool,
 }
 
 /// The float width of a value type, or `None` if it is not a float.
@@ -238,6 +283,7 @@ fn survey(module: &[u8]) -> Result<Survey, Error> {
     let mut imported_funcs = 0u32;
     let mut had_type_section = false;
     let mut had_import_section = false;
+    let mut had_global_section = false;
 
     for payload in wasmparser::Parser::new(0).parse_all(module) {
         let payload = payload.map_err(|e| Error::Parse {
@@ -278,6 +324,7 @@ fn survey(module: &[u8]) -> Result<Survey, Error> {
                 }
             }
             Payload::GlobalSection(reader) => {
+                had_global_section = true;
                 for global in reader {
                     let global = global.map_err(|e| Error::Parse {
                         detail: e.to_string(),
@@ -309,6 +356,7 @@ fn survey(module: &[u8]) -> Result<Survey, Error> {
         function_types,
         global_widths,
         had_import_section,
+        had_global_section,
     })
 }
 
@@ -324,9 +372,18 @@ struct Instrumenter {
     function_types: Vec<u32>,
     /// Float width of each global by index; see [`Survey::global_widths`].
     global_widths: Vec<Option<FloatWidth>>,
+    /// Index of the appended fuel counter under [`Metering::Global`].
+    ///
+    /// Globals are appended, and a submitted module cannot import one (the only importable
+    /// module is `cairn` and its whole interface is functions), so this index is one past the
+    /// module's own and nothing needs remapping — unlike the `charge` import, which has to be
+    /// inserted among the function indices.
+    fuel_global: u32,
     bodies_seen: usize,
     had_import_section: bool,
     emitted_import_section: bool,
+    had_global_section: bool,
+    emitted_global_section: bool,
 }
 
 impl Instrumenter {
@@ -385,6 +442,27 @@ impl Instrumenter {
             wasm_encoder::EntityType::Function(self.charge_type),
         );
         self.emitted_import_section = true;
+    }
+
+    /// Emit the global section entry for the fuel counter.
+    fn push_fuel_global(&mut self, globals: &mut wasm_encoder::GlobalSection) {
+        globals.global(
+            wasm_encoder::GlobalType {
+                val_type: EncValType::I64,
+                mutable: true,
+                shared: false,
+            },
+            &wasm_encoder::ConstExpr::i64_const(0),
+        );
+        self.emitted_global_section = true;
+    }
+
+    /// Append the per-block charge for [`Metering::Global`].
+    fn emit_global_charge(&self, func: &mut wasm_encoder::Function, amount: u32) {
+        func.instruction(&Instruction::GlobalGet(self.fuel_global));
+        func.instruction(&Instruction::I64Const(i64::from(amount)));
+        func.instruction(&Instruction::I64Add);
+        func.instruction(&Instruction::GlobalSet(self.fuel_global));
     }
 }
 
@@ -591,11 +669,46 @@ impl Reencode for Instrumenter {
         Ok(())
     }
 
-    /// A module with no imports of its own still needs one for `charge`.
+    /// Copy the original globals, then append the fuel counter.
+    fn parse_global_section(
+        &mut self,
+        globals: &mut wasm_encoder::GlobalSection,
+        section: wasmparser::GlobalSectionReader<'_>,
+    ) -> Result<(), wasm_encoder::reencode::Error<Self::Error>> {
+        wasm_encoder::reencode::utils::parse_global_section(self, globals, section)?;
+        if self.config.meter == Metering::Global {
+            self.push_fuel_global(globals);
+        }
+        Ok(())
+    }
+
+    /// Copy the original exports, then publish the fuel counter.
     ///
-    /// The hook fires between sections; the import section belongs immediately before the
-    /// function section, which every module reaching this pass has, since
-    /// [`crate::validate`] requires a defined entry point.
+    /// The export is the point of the whole encoding: an engine Cairn does not control can
+    /// run the module and read the total out afterwards, which a host call per basic block
+    /// buys at a price no compiler will bear.
+    fn parse_export_section(
+        &mut self,
+        exports: &mut wasm_encoder::ExportSection,
+        section: wasmparser::ExportSectionReader<'_>,
+    ) -> Result<(), wasm_encoder::reencode::Error<Self::Error>> {
+        wasm_encoder::reencode::utils::parse_export_section(self, exports, section)?;
+        if self.config.meter == Metering::Global {
+            exports.export(
+                FUEL_EXPORT,
+                wasm_encoder::ExportKind::Global,
+                self.fuel_global,
+            );
+        }
+        Ok(())
+    }
+
+    /// Sections the pass needs but the module might not have.
+    ///
+    /// The hook fires between sections, and each appended section belongs immediately before
+    /// one the module is guaranteed to have: the import section before the function section,
+    /// since [`crate::validate`] requires a defined entry point, and the global section before
+    /// the export section, since it requires two exports.
     fn intersperse_section_hook(
         &mut self,
         module: &mut wasm_encoder::Module,
@@ -609,6 +722,15 @@ impl Reencode for Instrumenter {
             let mut imports = wasm_encoder::ImportSection::new();
             self.push_charge_import(&mut imports);
             module.section(&imports);
+        }
+        if self.config.meter == Metering::Global
+            && !self.had_global_section
+            && !self.emitted_global_section
+            && before == Some(wasm_encoder::SectionId::Export)
+        {
+            let mut globals = wasm_encoder::GlobalSection::new();
+            self.push_fuel_global(&mut globals);
+            module.section(&globals);
         }
         wasm_encoder::reencode::utils::intersperse_section_hook(self, module, after, before)
     }
@@ -712,7 +834,7 @@ impl Reencode for Instrumenter {
         // Charge amounts, indexed by operator position. A run begins at position 0 and after
         // every control-flow operator; its length includes the operator that terminates it.
         let mut charge_at = vec![0u32; operators.len()];
-        if self.config.meter_fuel {
+        if self.config.meter.is_on() {
             let mut run_start = 0usize;
             for (i, op) in operators.iter().enumerate() {
                 if ends_run(op) {
@@ -738,8 +860,14 @@ impl Reencode for Instrumenter {
         for (i, op) in operators.iter().enumerate() {
             if let Some(&amount) = charge_at.get(i) {
                 if amount > 0 {
-                    func.instruction(&Instruction::I32Const(amount as i32));
-                    func.instruction(&Instruction::Call(self.charge_func));
+                    match self.config.meter {
+                        Metering::Off => {}
+                        Metering::HostCall => {
+                            func.instruction(&Instruction::I32Const(amount as i32));
+                            func.instruction(&Instruction::Call(self.charge_func));
+                        }
+                        Metering::Global => self.emit_global_charge(&mut func, amount),
+                    }
                 }
             }
 
@@ -799,6 +927,35 @@ mod tests {
 
     fn canon(text: &str) -> Vec<u8> {
         instrument(&wasm(text), Config::default()).expect("instrumentation should succeed")
+    }
+
+    /// Instrument with the global-counter encoding, canonicalization otherwise unchanged.
+    fn canon_global(text: &str) -> Vec<u8> {
+        instrument(
+            &wasm(text),
+            Config {
+                meter: Metering::Global,
+                ..Config::default()
+            },
+        )
+        .expect("instrumentation should succeed")
+    }
+
+    /// Exports of a module, as `name:kind@index` strings in order.
+    fn exports(module: &[u8]) -> Vec<String> {
+        let mut out = Vec::new();
+        for payload in wasmparser::Parser::new(0).parse_all(module) {
+            if let Payload::ExportSection(reader) = payload.unwrap() {
+                for export in reader {
+                    let export = export.unwrap();
+                    out.push(format!(
+                        "{}:{:?}@{}",
+                        export.name, export.kind, export.index
+                    ));
+                }
+            }
+        }
+        out
     }
 
     /// Validate an instrumented module. The admitted feature set is unchanged by
@@ -1086,7 +1243,7 @@ mod tests {
         let bare = instrument(
             &wasm(WITH_IMPORTS),
             Config {
-                meter_fuel: false,
+                meter: Metering::Off,
                 canonicalize: Canonicalization::Never,
             },
         )
@@ -1102,7 +1259,7 @@ mod tests {
         let metered = instrument(
             &wasm(WITH_IMPORTS),
             Config {
-                meter_fuel: true,
+                meter: Metering::HostCall,
                 canonicalize: Canonicalization::Never,
             },
         )
@@ -1134,6 +1291,90 @@ mod tests {
                 "body {body} must open with a charge: {ops:?}"
             );
             assert_eq!(ops.get(1).map(String::as_str), Some("Call"));
+        }
+    }
+
+    #[test]
+    fn the_global_encoding_charges_where_the_host_call_did() {
+        // Same sites, same amounts, four instructions instead of two and no call. The loop
+        // case is the one that matters: a charge must still be *inside* the body.
+        let source = r#"(module
+             (memory (export "memory") 1 1)
+             (func (export "cairn_run") (local $i i32)
+               (loop $again
+                 (local.set $i (i32.add (local.get $i) (i32.const 1)))
+                 (br_if $again (i32.lt_u (local.get $i) (i32.const 10))))))"#;
+
+        let ops = operators(&canon_global(source), 0);
+        assert_valid(&canon_global(source));
+
+        let loop_at = ops.iter().position(|o| o == "Loop").expect("loop present");
+        assert_eq!(
+            ops.get(loop_at + 1..loop_at + 5)
+                .map(|s| s.iter().map(String::as_str).collect::<Vec<_>>()),
+            Some(vec!["GlobalGet", "I64Const", "I64Add", "GlobalSet"]),
+            "the loop body must open with a charge: {ops:?}"
+        );
+        assert!(
+            !ops.contains(&"Call".to_owned()),
+            "the global encoding enters the host for nothing: {ops:?}"
+        );
+
+        // Both encodings charge at the same operator positions, which is what makes the fuel
+        // totals equal; `tests/metering.rs` checks the totals themselves, end to end.
+        let charge_sites = |ops: &[String], marker: &str| -> Vec<usize> {
+            ops.iter()
+                .enumerate()
+                .filter(|(_, o)| o.as_str() == marker)
+                .map(|(i, _)| i)
+                .collect()
+        };
+        assert_eq!(
+            charge_sites(&ops, "GlobalGet").len(),
+            charge_sites(&operators(&canon(source), 0), "Call").len(),
+            "the two encodings must charge the same number of times"
+        );
+    }
+
+    #[test]
+    fn the_fuel_counter_is_appended_and_exported() {
+        // Two shapes: a module with globals of its own, and one with none at all. In both the
+        // counter must land one past the module's own index space, so nothing needs remapping.
+        let with_globals = canon_global(
+            r#"(module
+                 (memory (export "memory") 1 1)
+                 (global $a (mut i32) (i32.const 7))
+                 (global $b f64 (f64.const 1))
+                 (func (export "cairn_run") (drop (global.get $a))))"#,
+        );
+        assert_valid(&with_globals);
+        assert!(
+            exports(&with_globals).contains(&"cairn_fuel:Global@2".to_owned()),
+            "counter must follow the module's own two globals: {:?}",
+            exports(&with_globals)
+        );
+
+        let without =
+            canon_global(r#"(module (memory (export "memory") 1 1) (func (export "cairn_run")))"#);
+        assert_valid(&without);
+        assert!(
+            exports(&without).contains(&"cairn_fuel:Global@0".to_owned()),
+            "a module with no global section must still get one: {:?}",
+            exports(&without)
+        );
+    }
+
+    #[test]
+    fn the_counter_appears_only_when_it_is_used() {
+        // An honest-path module must not carry it: the export is what makes the counter
+        // readable, and a module that never writes one would publish a permanent zero.
+        for config in [Config::honest_path(), Config::default()] {
+            let out = instrument(&wasm(WITH_IMPORTS), config).unwrap();
+            assert!(
+                !exports(&out).iter().any(|e| e.starts_with("cairn_fuel:")),
+                "{config:?} must not export a counter: {:?}",
+                exports(&out)
+            );
         }
     }
 

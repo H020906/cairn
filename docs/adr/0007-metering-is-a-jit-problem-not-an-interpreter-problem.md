@@ -4,6 +4,7 @@
 - **Date:** 2026-08-09
 - **Confirms and reinstates:** the remediation [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md) proposed and [ADR-0005](0005-the-fast-path-cannot-snapshot.md) withdrew
 - **Corrected in part by:** [ADR-0008](0008-a-dispute-costs-an-interpreted-re-execution.md)
+- **Remediation built and measured in:** [ADR-0009](0009-metering-through-a-global-the-engines-disagree.md)
 
 > **The +505% below is real, and nobody pays it.** This ADR measured fuel metering on a JIT
 > without first asking who runs the fully instrumented module — and the answer is that no host
@@ -17,6 +18,15 @@
 > **This ADR's other conclusion is untouched, and it is the important one: the honest path
 > costs 0% on a real optimising compiler.** The reinstated metering fix is still correct, just
 > no longer urgent.
+>
+> **The fix has since been built, and this ADR described it wrongly in two ways**
+> ([ADR-0009](0009-metering-through-a-global-the-engines-disagree.md)). "Three arithmetic
+> instructions on the common path" is not achievable — WebAssembly has no `global.tee`, so the
+> threshold test costs eight instructions, not three. And the threshold test is not needed at
+> all, because whoever executes the module can read the counter without being told. The shipped
+> encoding is four instructions and no branch. Measured, it is **2×–6× faster on a compiler and
+> 1.14×–1.25× slower in the interpreter** — so it does not become the dispute path's encoding,
+> which is the opposite of what this ADR expected.
 
 ## Context
 

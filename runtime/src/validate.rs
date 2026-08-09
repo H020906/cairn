@@ -60,6 +60,15 @@ pub const HOST_OUTPUT: &str = "output";
 /// importing it directly would let a workload lie about how much it had executed.
 pub const HOST_CHARGE: &str = "charge";
 
+/// The global a metered module exports its instruction count under: `cairn_fuel`, an `i64`.
+///
+/// **Injected by the instrumentation pass, never written by a workload author.** It is the
+/// counterpart to [`HOST_CHARGE`] for engines that cannot afford a host call per basic block:
+/// the module accumulates into the global, and whoever ran it reads the total afterwards. A
+/// submitted module exporting this name is rejected for the same reason importing `charge` is
+/// — it is the count of its own execution, and a workload must not be able to write it.
+pub const FUEL_EXPORT: &str = "cairn_fuel";
+
 /// The function a work unit must export as its entry point.
 pub const ENTRY_POINT: &str = "cairn_run";
 
@@ -174,6 +183,11 @@ pub enum Rejection {
         /// The reserved name that was imported.
         name: String,
     },
+    /// An export of a name reserved for the instrumentation pass.
+    ReservedExport {
+        /// The reserved name that was exported.
+        name: String,
+    },
     /// An import from the `cairn` module that is not part of the host interface.
     UnknownHostFunction {
         /// The name that was imported.
@@ -243,6 +257,11 @@ impl fmt::Display for Rejection {
                 f,
                 "`{HOST_MODULE}::{name}` is reserved for the instrumentation pass and may not be \
                  imported directly"
+            ),
+            Self::ReservedExport { name } => write!(
+                f,
+                "`{name}` is reserved for the instrumentation pass and may not be exported by a \
+                 submitted module"
             ),
             Self::UnknownHostFunction { name } => {
                 write!(
@@ -457,6 +476,15 @@ fn inspect(bytes: &[u8], limits: Limits) -> Result<ModuleFacts, Rejection> {
                     match (export.name, export.kind) {
                         (ENTRY_POINT, ExternalKind::Func) => exports_entry = true,
                         (MEMORY_EXPORT, ExternalKind::Memory) => exports_memory = true,
+                        // Refused whatever it names. The instrumentation pass appends this
+                        // export itself, and two exports of one name is not a valid module —
+                        // so a submitted module claiming the name would make instrumentation
+                        // fail at registration rather than here, with a worse message.
+                        (FUEL_EXPORT, _) => {
+                            return Err(Rejection::ReservedExport {
+                                name: FUEL_EXPORT.to_owned(),
+                            })
+                        }
                         _ => {}
                     }
                 }
@@ -770,6 +798,43 @@ mod tests {
             .unwrap_err(),
             Rejection::ReservedImport {
                 name: "charge".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_exporting_the_fuel_counter() {
+        // The other half of the same rule. A workload that owned this name could publish a
+        // number of its own choosing as the count of its own execution — and under the global
+        // metering encoding it could write to it as well.
+        //
+        // Both kinds are refused, because the name is what identifies the counter to whoever
+        // ran the module; a function called `cairn_fuel` would be just as misleading.
+        assert_eq!(
+            check(
+                r#"(module
+                     (memory (export "memory") 1 1)
+                     (global $g (mut i64) (i64.const 0))
+                     (export "cairn_fuel" (global $g))
+                     (func (export "cairn_run")))"#,
+            )
+            .unwrap_err(),
+            Rejection::ReservedExport {
+                name: "cairn_fuel".to_owned()
+            }
+        );
+
+        assert_eq!(
+            check(
+                r#"(module
+                     (memory (export "memory") 1 1)
+                     (func $f (result i64) (i64.const 0))
+                     (export "cairn_fuel" (func $f))
+                     (func (export "cairn_run")))"#,
+            )
+            .unwrap_err(),
+            Rejection::ReservedExport {
+                name: "cairn_fuel".to_owned()
             }
         );
     }

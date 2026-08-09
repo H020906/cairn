@@ -57,7 +57,7 @@
 // assertions.
 #![allow(clippy::expect_used, clippy::indexing_slicing)]
 
-use cairn_runtime::canon::{self, Canonicalization, Config};
+use cairn_runtime::canon::{self, Canonicalization, Config, Metering};
 use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
 use cairn_runtime::validate;
@@ -108,7 +108,7 @@ fn canonical_with(text: &str, config: Config) -> Vec<u8> {
 const HONEST_CONFIGS: [Config; 2] = [
     Config::honest_path(),
     Config {
-        meter_fuel: false,
+        meter: Metering::Off,
         canonicalize: Canonicalization::Everywhere,
     },
 ];
@@ -252,9 +252,22 @@ fn run_wasmi(module: &[u8], input: &[u8]) -> Outcome {
         .get_typed_func::<(), ()>(&store, validate::ENTRY_POINT)
         .expect("workload exports its entry point");
 
-    match entry.call(&mut store, ()) {
-        Ok(()) => Outcome::reference(Some(store.data().output.clone()), store.data().fuel),
-        Err(_) => Outcome::reference(None, store.data().fuel),
+    let result = entry.call(&mut store, ());
+
+    // Under `Metering::Global` there are no `charge` calls to accumulate; the count is in a
+    // global the module exports, and reading it back out is the entire claim that encoding
+    // makes. Reading it *after* a trap matters too — a partial count is still a count.
+    let fuel = match instance.get_global(&store, validate::FUEL_EXPORT) {
+        Some(global) => match global.get(&store) {
+            wasmi::Val::I64(n) => n as u64,
+            other => panic!("the counter must be an i64, got {other:?}"),
+        },
+        None => store.data().fuel,
+    };
+
+    match result {
+        Ok(()) => Outcome::reference(Some(store.data().output.clone()), fuel),
+        Err(_) => Outcome::reference(None, fuel),
     }
 }
 
@@ -346,9 +359,22 @@ fn run_wasmtime(module: &[u8], input: &[u8]) -> Outcome {
         .get_typed_func::<(), ()>(&mut store, validate::ENTRY_POINT)
         .expect("workload exports its entry point");
 
-    match entry.call(&mut store, ()) {
-        Ok(()) => Outcome::reference(Some(store.data().output.clone()), store.data().fuel),
-        Err(_) => Outcome::reference(None, store.data().fuel),
+    let result = entry.call(&mut store, ());
+
+    // As on the wasmi side: the global-metered module reports through an export rather than a
+    // host call. This is the one place in the repository where a *compiler* is asked for the
+    // instruction count, which is what that encoding exists to make possible.
+    let fuel = match instance.get_global(&mut store, validate::FUEL_EXPORT) {
+        Some(global) => match global.get(&mut store) {
+            wasmtime::Val::I64(n) => n as u64,
+            other => panic!("the counter must be an i64, got {other:?}"),
+        },
+        None => store.data().fuel,
+    };
+
+    match result {
+        Ok(()) => Outcome::reference(Some(store.data().output.clone()), fuel),
+        Err(_) => Outcome::reference(None, fuel),
     }
 }
 
@@ -391,7 +417,50 @@ fn assert_agree(name: &str, text: &str, input: &[u8]) {
         "{name}: output differs against wasmtime",
     );
 
+    assert_metering_encodings_agree(name, text, input, &mine);
     assert_instrumentation_is_transparent(name, text, input, &mine);
+}
+
+/// Assert that how a module counts does not change what it counts, or what it computes.
+///
+/// [`Metering::Global`] replaces the per-block host call with an addition into a counter the
+/// module exports. The reason it exists is that a compiler charges an enormous premium for the
+/// host call and none for the addition — but a cheaper encoding is worthless if it produces a
+/// different number, so this checks the number.
+///
+/// The two reference engines here are doing something they do nowhere else in this file: they
+/// are reporting an instruction count **they were not told**. Under the host-call encoding the
+/// harness accumulates the total itself, one call at a time, which proves little beyond that
+/// the calls happened. Here the module keeps its own count and the engine hands the global
+/// back at the end, so agreement means the engine executed the same basic blocks in the same
+/// order — and wasmtime reaching the same total as Cairn's interpreter is the closest this
+/// repository comes to evidence that a volunteer's own engine could report its work honestly.
+#[track_caller]
+fn assert_metering_encodings_agree(name: &str, text: &str, input: &[u8], by_host_call: &Outcome) {
+    let module = canonical_with(
+        text,
+        Config {
+            meter: Metering::Global,
+            ..Config::default()
+        },
+    );
+
+    for (engine, outcome) in [
+        ("cairn", run_cairn(&module, input)),
+        ("wasmi", run_wasmi(&module, input)),
+        ("wasmtime", run_wasmtime(&module, input)),
+    ] {
+        assert_eq!(
+            outcome.output, by_host_call.output,
+            "{name}: {engine} computed something else under global metering",
+        );
+        assert_eq!(
+            outcome.fuel, by_host_call.fuel,
+            "{name}: {engine} counted {} instructions through the exported global where the \
+             host call counted {}",
+            outcome.fuel, by_host_call.fuel,
+        );
+    }
 }
 
 /// Assert that adding metering does not change what a workload computes.

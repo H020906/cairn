@@ -19,6 +19,7 @@ done this way?"*
 | [0006](0006-canonicalize-nans-at-escapes-on-the-honest-path.md) | Canonicalize NaNs where they can escape, not where they are made | Accepted |
 | [0007](0007-metering-is-a-jit-problem-not-an-interpreter-problem.md) | Metering is a compiler problem, and the interpreter was hiding it | Accepted, corrected by 0008 |
 | [0008](0008-a-dispute-costs-an-interpreted-re-execution.md) | A dispute costs the parties an interpreted re-execution | Accepted |
+| [0009](0009-metering-through-a-global-the-engines-disagree.md) | Metering through a global: the two engines want opposite things | Accepted |
 
 ## Reading order
 

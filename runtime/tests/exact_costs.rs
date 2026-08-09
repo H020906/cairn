@@ -28,7 +28,7 @@
 
 #![allow(clippy::expect_used)]
 
-use cairn_runtime::canon::{self, Canonicalization, Config};
+use cairn_runtime::canon::{self, Canonicalization, Config, Metering};
 use cairn_runtime::dispute::{self, Replay, Step};
 use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
@@ -63,7 +63,7 @@ fn counts(text: &str) -> Counts {
         bare: steps(
             text,
             Config {
-                meter_fuel: false,
+                meter: Metering::Off,
                 canonicalize: Canonicalization::Never,
             },
         ),
@@ -71,7 +71,7 @@ fn counts(text: &str) -> Counts {
         metered: steps(
             text,
             Config {
-                meter_fuel: true,
+                meter: Metering::HostCall,
                 canonicalize: Canonicalization::Never,
             },
         ),
@@ -177,6 +177,52 @@ fn instrumentation_costs_exactly_what_it_did() {
         },
         "recursion"
     );
+}
+
+/// What the global metering encoding costs in instructions, which is the half of it that is
+/// not a matter of which engine you ask.
+///
+/// `HostCall` injects two instructions per charge site and enters the host; `Global` injects
+/// four and does not ([ADR-0009](../../docs/adr/0009-metering-through-a-global-the-engines-disagree.md)).
+/// So the gap between them must be exactly the gap between `HostCall` and no metering at all,
+/// and both are pinned here — the relation because it is what says the two encodings charge at
+/// the same sites, and the absolute numbers because a relation between two wrong numbers is
+/// still a relation.
+///
+/// **Instructions are not the whole cost and this test cannot see the rest of it.** Four
+/// interpreted instructions are dearer than two plus an intercepted call, and four compiled
+/// instructions are far cheaper than a compiled host call. That part is wall-clock and lives in
+/// the benchmark.
+#[test]
+fn the_global_encoding_pays_in_instructions_what_it_saves_in_calls() {
+    let by_global = |text: &str| {
+        steps(
+            text,
+            Config {
+                meter: Metering::Global,
+                canonicalize: Canonicalization::Never,
+            },
+        )
+    };
+
+    for (name, text, expected) in [
+        ("integer loop", INTEGER_LOOP, 46_029),
+        ("float kernel", FLOAT_KERNEL, 31_031),
+        ("recursion", RECURSION, 46_374),
+    ] {
+        let c = counts(text);
+        let global = by_global(text);
+
+        assert_eq!(
+            global, expected,
+            "{name}: instructions under global metering"
+        );
+        assert_eq!(
+            global - c.metered,
+            c.metered - c.bare,
+            "{name}: the two encodings charged at different sites"
+        );
+    }
 }
 
 /// An integer-only workload must gain **nothing** from either canonicalization setting.

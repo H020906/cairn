@@ -75,6 +75,14 @@ jobs:
         # deliberate and explained, which is what a failing assertion forces.
         run: cargo test --test exact_costs -- --nocapture
 
+      - name: The two metering encodings are still interchangeable
+        # A work unit may count its instructions through a host call or through an exported
+        # global (docs/adr/0009). They must agree on the answer, the fuel total, where fuel runs
+        # out, and every snapshot label — everything except the step index, which is private to
+        # the parties. If they can drift apart, a unit's arbitration outcome depends on which
+        # encoding it was registered with, which is not a property any of this survives.
+        run: cargo test --test metering -- --nocapture
+
       - name: Note the current limit of this gate
         # Honest accounting, kept accurate as coverage changes. Both generators are seeded from
         # fixed constants so a failure is reproducible rather than a flake, which also means a
