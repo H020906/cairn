@@ -241,7 +241,7 @@ queue anyone could write.
 The project is explicitly built to be picked up by people who did not write it.
 
 - **[docs/MAINTAINER.md](docs/MAINTAINER.md)** — the state of the project, honestly: what
-  works, what does not, the seven invariants that must not be broken, and what to do with
+  works, what does not, the eight invariants that must not be broken, and what to do with
   your first hour, day and week.
 - **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** — specified pieces of real work,
   sized, each with where to start and how you know you are done. Five are open; the six that

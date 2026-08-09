@@ -75,6 +75,19 @@ jobs:
         # deliberate and explained, which is what a failing assertion forces.
         run: cargo test --test exact_costs -- --nocapture
 
+      - name: The admission gate decides, whatever it is given
+        # `validate.rs` is the only place in Cairn where bytes chosen by a stranger meet code,
+        # and everything downstream is entitled to assume it ran. Its contract is total: any
+        # input produces Ok or Err, never a panic and never a hang. A panic here is a
+        # coordinator a stranger can stop by uploading eleven bytes.
+        #
+        # 80,000 seeded inputs per run across four generators, the useful two being mutations
+        # and splices of valid modules — random bytes die at the magic number, while a valid
+        # module with three compounding mutations is *nearly* consistent, which is where a
+        # parser's assumptions live. The test prints how many inputs got past the header and
+        # fails if a generator has quietly gone vacuous.
+        run: cargo test --test admission -- --nocapture
+
       - name: The two metering encodings are still interchangeable
         # A work unit may count its instructions through a host call or through an exported
         # global (docs/adr/0009). They must agree on the answer, the fuel total, where fuel runs

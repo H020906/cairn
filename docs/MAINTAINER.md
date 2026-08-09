@@ -162,6 +162,13 @@ agreement. It contains a deliberately-divergent case so the harness cannot pass 
 two seeded generators: 300 float expressions and 200 whole `wasm-smith` modules per run. If
 this goes red, engines disagree, which is the single largest technical risk in the project.
 
+**8. The admission gate must decide, whatever it is given.** `validate::validate_submitted` is
+the only place in Cairn where bytes chosen by a stranger meet code, and everything downstream
+assumes it ran. Its contract is total — any input yields `Ok` or `Err`, never a panic and never
+a hang. `tests/admission.rs` holds it with four seeded generators and times every input, so a
+hang arrives as a named regression case rather than a killed CI job. **12 million inputs have
+found nothing**, which is stated as the negative result it is.
+
 **Both generators have caught real defects, which is the argument for keeping them.** The float
 one caught a removed `copysign` escape the hand-written cases could not reach. The module one
 found, on its first run, that `br 0` at function scope names WebAssembly's implicit function

@@ -11,7 +11,36 @@ perfectly good first PR.
 
 ---
 
-### 1 · Fuzz the admission gate — it must never panic · **S** · `good-first-issue`
+### 1 · ~~Fuzz the admission gate~~ — **done, and it found nothing** · `closed`
+
+> `runtime/tests/admission.rs`. Four seeded generators — random bytes, noise behind a valid
+> header, chained mutations of valid modules, and splices of two — 80,000 inputs per run in CI
+> and as many as you like locally via `CAIRN_FUZZ_ITERATIONS`. Every input is timed, because a
+> hang inside a validator is indistinguishable from a slow CI runner until the job is killed
+> with no information about which input did it.
+>
+> **12 million inputs found no panic and no hang.** That is a negative result and it is
+> reported as one: the other two generators in this repository each caught a real defect on
+> their first run, and this one did not. 96,177 of those inputs were *admitted*, so the second
+> property — **an admitted module must be instrumentable**, or a coordinator has accepted a
+> unit it can never dispatch — was exercised rather than assumed.
+>
+> The suite reports how many inputs got past the magic number and fails if a generator has gone
+> vacuous. Without that, a corpus that stopped being valid would leave every generator passing
+> while testing nothing but the rejection path.
+>
+> One suspicion checked and dismissed on the way: `validate.rs` states no limit on locals while
+> `image.rs` refuses above 50,000, which looks like a module that could be admitted and then
+> never arbitrated. `wasmparser`'s spec validator enforces the same ceiling, so the gate covers
+> it — and `MAX_LOCALS_PER_FUNCTION` now says so, and says what breaks if it is raised alone.
+>
+> **Still open: coverage-guided fuzzing.** `cargo fuzz` needs nightly and a separate crate;
+> the note at the bottom of `admission.rs` says exactly how to set it up and to seed it from
+> the corpus already there.
+
+<details><summary>Original issue</summary>
+
+### Fuzz the admission gate — it must never panic · **S** · `good-first-issue`
 
 `validate.rs` is the boundary between untrusted bytes and everything else. Its contract is
 that *any* input produces `Ok` or `Err`, never a panic and never a hang.
@@ -20,6 +49,8 @@ that *any* input produces `Ok` or `Err`, never a panic and never a hang.
 the valid modules already in `runtime/tests/`.
 **Done when:** a fuzz target exists, runs in CI with a short time budget, and the README of
 the fuzz directory says how to run it longer locally.
+
+</details>
 
 ---
 

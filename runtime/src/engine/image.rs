@@ -36,6 +36,19 @@ use crate::validate::{
 /// Locals are declared run-length encoded, so a tiny module can ask for billions of them.
 /// The interpreter indexes locals directly, so the declaration is expanded — and therefore
 /// has to be bounded, or a malicious workload could exhaust memory at decode time.
+///
+/// # This is not a hole in the admission gate, and the question is worth answering here
+///
+/// The obvious worry is that [`crate::validate`] states no local limit of its own, so a module
+/// declaring 50,001 locals would be *admitted* and then refused here — a work unit a
+/// coordinator accepts at registration, dispatches happily (a real engine has no such limit),
+/// and then cannot arbitrate, which would be an exception to "any result can be challenged".
+///
+/// It does not happen. `wasmparser`'s spec-level validator enforces the same 50,000 ceiling,
+/// so such a module is refused at the gate with *too many locals* before any Cairn rule runs.
+/// This constant is deliberately equal to that one. **If it is ever raised, the gate stops
+/// covering it and the hole above becomes real** — so raise the two together, or add an
+/// explicit check to `validate`.
 pub const MAX_LOCALS_PER_FUNCTION: u32 = 50_000;
 
 /// A host function the module imports.
