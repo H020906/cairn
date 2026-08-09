@@ -893,6 +893,12 @@ fn witness_size() {
         "An adjudicator's cost is set by this, not by the disputed execution's length. Pages \
          are 64 KiB each and dominate; everything else is tens of values.\n"
     );
+    println!(
+        "**The worst case below is a property of this workload, not a bound.** None of these \
+         use `memory.fill`, which reaches as far in one instruction as its length says — a \
+         100,000-byte fill touches two pages, and a longer one touches more. ADR-0001 says so \
+         in prose; `tests/exact_costs.rs` pins it with a number.\n"
+    );
 
     let module = canonical(MEMORY_SWEEP, Config::default());
     let image = image::decode(&module).expect("should decode");

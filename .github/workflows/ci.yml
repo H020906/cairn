@@ -67,6 +67,14 @@ jobs:
         # are exactly the ways that break bit-exact agreement.
         run: cargo test --test differential -- --nocapture
 
+      - name: The exact costs have not moved without saying so
+        # The other half of `cargo bench`. Wall-clock cannot be gated — the benchmark measures
+        # its own error and it is large. Instruction counts, bisection round counts and witness
+        # page counts are exact on every machine, and every claim this project makes rests on
+        # one of them. A change here is not necessarily a bug; it is a change that has to be
+        # deliberate and explained, which is what a failing assertion forces.
+        run: cargo test --test exact_costs -- --nocapture
+
       - name: Note the current limit of this gate
         # Honest accounting, kept accurate as coverage changes. Both generators are seeded from
         # fixed constants so a failure is reproducible rather than a flake, which also means a

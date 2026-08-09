@@ -77,7 +77,7 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | Claim | Status |
 |---|---|
 | Arbitration cost is independent of execution length | **Confirmed.** 21k steps → 15 rounds; 2.1M steps → 21 rounds |
-| A witness is small | **Confirmed.** One 64 KiB page worst case over 20,000 sampled instructions |
+| A witness is small | **Confirmed, with a caveat now pinned by a test.** One 64 KiB page for ordinary instructions; a `memory.fill` reaches as far as its length says, and 100,000 bytes touches two |
 | Metering does not change what a program computes | **Confirmed.** Every differential case, both engines, identical output and trapping |
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
 | A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |

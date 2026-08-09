@@ -56,7 +56,23 @@ to a module the validator admits, and the rejection reasons are explained rather
 
 ---
 
-### 4 · Separate the deterministic benchmark columns from the noisy ones · **M** · `good-first-issue`
+### 4 · ~~Separate the deterministic benchmark columns from the noisy ones~~ — **done** · `closed`
+
+> Both halves landed. The benchmark measures its own error and prints anything smaller than it
+> as *not resolved*; the exact metrics moved into `runtime/tests/exact_costs.rs`, which CI runs
+> on every push — instruction counts per instrumentation setting, bisection rounds against
+> execution length, and witness page counts, all committed as numbers.
+>
+> Writing it turned up something the benchmark had been quietly overstating: `cargo bench`
+> reports a worst-case witness of **one** page, which is true of its workloads and not true in
+> general. None of them use `memory.fill`, which reaches as far in one instruction as its
+> length says — 100,000 bytes touches two pages. ADR-0001 already said so in prose after being
+> corrected away from an `O(1)` claim; there is now a number holding it in place, and the
+> benchmark says the figure is a property of its workloads rather than a bound.
+
+<details><summary>Original issue</summary>
+
+### Separate the deterministic benchmark columns from the noisy ones · **M** · `good-first-issue`
 
 `benches/cost.rs` reports two kinds of number in one table: wall-clock times (noisy to about
 ±10% — three ratios in the committed run come out below 1.00×, which is impossible) and exact
@@ -72,6 +88,8 @@ fails if they change unexpectedly, and wall-clock stays advisory.
 own error rather than asserting one — it times pairs of configurations that instrument to
 byte-identical modules, and prints any figure smaller than that error as *not resolved*. On
 one workload the error is 148%. What is missing is the CI gate on the exact counts.
+
+</details>
 
 ---
 

@@ -102,7 +102,8 @@ nothing else.
 | 9 | `runtime/src/engine/machine.rs` | 1987 | The interpreter, snapshots, witnesses |
 | 10 | `runtime/src/dispute.rs` | 1148 | Bisection protocol + adjudication |
 | 11 | `runtime/tests/differential.rs` | ~1100 | Cairn's interpreter vs `wasmi` **and `wasmtime`**, same bytes, must agree — plus a seeded float-expression generator |
-| 12 | `runtime/benches/cost.rs` | 436 | What verification costs |
+| 12 | `runtime/benches/cost.rs` | ~900 | What verification costs — the *reporting* instrument, run by hand |
+| 13 | `runtime/tests/exact_costs.rs` | ~290 | The same costs, the exact ones only — the *gate*, run by CI |
 
 Then the four ADRs in [docs/adr/](adr/), in numerical order. ADR-0001 is the thesis;
 ADR-0004 is the measurement that took a bite out of it.
