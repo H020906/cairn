@@ -28,6 +28,12 @@ git clone https://github.com/H020906/cairn && cd cairn
 cargo test --workspace
 ```
 
+Then watch a million-instruction disagreement get settled by executing one instruction:
+
+```bash
+cargo run -p cairn-worker -- dispute workloads/examples/sum-of-squares.wat workloads/examples/input-a.bin workloads/examples/input-b.bin
+```
+
 `docker-compose.yml` exists and will start PostgreSQL and Redis. Nothing connects to them
 yet; it is there so the eventual coordinator has a one-command environment, not because you
 need it today.

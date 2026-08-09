@@ -67,9 +67,15 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
   not a directory that exists.
 - **No database.** No schema, no migrations. `docker-compose.yml` will start PostgreSQL and
   Redis for you and nothing will connect to them.
-- **No browser worker, no native worker, no dashboard.** `worker-browser/`,
-  `worker-native/`, `web/` — none of them exist.
-- **No real workload.** The molecular-docking target is an intention.
+- **No browser worker and no dashboard.** `worker-browser/` and `web/` do not exist.
+- **No real workload.** The molecular-docking target is an intention;
+  `workloads/examples/sum-of-squares.wat` is a demonstration fixture, not science.
+
+And one thing that *does* exist and is the fastest way in:
+
+- **`worker-native/` — `cairn-worker`.** Three commands: `run` a unit on wasmtime, `trace` one
+  on the interpreter, `dispute` two claimed executions end to end. Running the last one is the
+  shortest path to understanding what this project is.
 - **No fast path.** It has not been written, and every measurement in this repository is on
   the *slow* interpreter. Note that what it has to do got **smaller**: under
   [ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md) it runs a determinism-instrumented
@@ -249,9 +255,15 @@ table must be revisited **before** the feature is enabled, not after.
 
 ## 7. If you have an hour, a day, a week
 
-**An hour.** Clone it, run `cargo test --workspace`, then read `dispute.rs` from the top.
-The bisection state machine is the most self-contained interesting thing here, and its tests
-read like a specification.
+**An hour.** Clone it and run this:
+
+```bash
+cargo run -p cairn-worker -- dispute workloads/examples/sum-of-squares.wat workloads/examples/input-a.bin workloads/examples/input-b.bin
+```
+
+A million-instruction disagreement settled by executing one instruction, in about 50µs. Then
+read `dispute.rs` from the top — it is the most self-contained interesting thing here, and its
+tests read like a specification.
 
 **A day.** Do one item from [GOOD_FIRST_ISSUES.md](GOOD_FIRST_ISSUES.md). The point is less
 the change than getting the invariants in §5 into your hands rather than your notes.

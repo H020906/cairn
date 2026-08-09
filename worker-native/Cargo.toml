@@ -1,0 +1,22 @@
+[package]
+name = "cairn-worker"
+description = "Run a Cairn work unit, and settle a disagreement about one, from the command line"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+cairn-runtime = { path = "../runtime" }
+# The honest path is whatever engine the volunteer already has. Natively that is wasmtime; in a
+# browser it would be the one in the page. Cairn's own interpreter is deliberately *not* used
+# for it — see ADR-0005.
+wasmtime = { version = "38", default-features = false, features = ["cranelift", "runtime", "std"] }
+# Accepts `.wat` as well as `.wasm`, so the tool is useful without a WebAssembly toolchain
+# installed. Text assembly happens before validation and is not part of the work unit.
+wat = "1.255.0"
+
+[lints]
+workspace = true

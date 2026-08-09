@@ -225,12 +225,12 @@ flowchart LR
     CO -.->|"arbitration only"| RT
 
     classDef unbuilt stroke-dasharray:6 4,color:#888,stroke:#888
-    class BW,NW,UI,CO,PG,RD unbuilt
+    class BW,UI,CO,PG,RD unbuilt
 ```
 
-**Solid box = exists. Dashed = designed, not built.** Today that is one box out of seven:
-`runtime/`. See [docs/MAINTAINER.md](docs/MAINTAINER.md) for what that means in practice
-before you plan work against this diagram.
+**Solid box = exists. Dashed = designed, not built.** Today that is two of seven: `runtime/`
+and the native worker. See [docs/MAINTAINER.md](docs/MAINTAINER.md) for what that means in
+practice before you plan work against this diagram.
 
 ### `runtime/` — Rust
 The deterministic execution kernel. Two engines behind one interface:
@@ -252,9 +252,13 @@ The zero-install volunteer. Runs inside a Web Worker so the page stays responsiv
 a CPU budget, and backs off on battery power and metered connections. Opening a web page
 is the entire onboarding flow.
 
-### `worker-native/` — Rust
-For contributors donating a whole machine. Single binary, SQLite for the local unit cache,
-checkpointing, and schedule/core limits (e.g. "only overnight, only 6 cores").
+### `worker-native/` — Rust · **built**
+`cairn-worker`: `run` a unit on wasmtime under honest-path instrumentation, `trace` one on the
+interpreter to produce a commitment, `dispute` two claimed executions end to end. Running the
+last of those is the shortest description of this project that exists.
+
+Still to come for a machine actually donating time: SQLite for the local unit cache, resumable
+state, and schedule/core limits ("only overnight, only 6 cores").
 
 ### `web/` — React 19 + TypeScript + Tailwind + three.js + GSAP
 The contributor-facing surface. The globe renders **live node topology and real throughput

@@ -143,39 +143,65 @@ others cannot. See [ADR-0002](docs/adr/0002-language-boundaries.md).
 
 ## Quick start
 
-There is no running system to start yet — see the roadmap. What you *can* do is verify every
-claim on this page for yourself, with Rust and nothing else installed:
+Rust, and nothing else installed. Do a work unit:
+
+```bash
+cargo run -p cairn-worker -- run workloads/examples/sum-of-squares.wat workloads/examples/input-a.bin
+```
+
+Now have two volunteers disagree about that same unit, and find out which one is lying:
+
+```bash
+cargo run -p cairn-worker -- dispute workloads/examples/sum-of-squares.wat workloads/examples/input-a.bin workloads/examples/input-b.bin
+```
+
+```
+disputed length   1050030 instructions
+bisection rounds  20
+divergence        step 1050016
+time to bisect    39.8ms
+
+Adjudicating that one instruction took 52.3µs.
+Verdict: the second party was wrong.
+```
+
+**That is the entire idea, in one command.** A million-instruction disagreement, settled by
+executing *one* instruction — and the referee's 52µs is what does not grow when the execution
+does. `cairn-worker trace` shows the other half: the same unit, on the interpreter, producing
+the commitment that made the bisection possible.
+
+To check the claims on this page rather than take them:
 
 ```bash
 cargo test --workspace
 ```
 
-197 tests. Among them: an interpreter checked instruction-by-instruction against an
-independent WASM engine, a bisection game that converges on a corrupted instruction, and an
-adjudication that names the liar without replaying the job. Then `cargo bench` regenerates
-the numbers in the table above, including the one that came out badly.
+206 tests. Among them: an interpreter checked instruction-by-instruction against **two**
+independent WASM engines including a JIT, 300 randomly generated float expressions per run, a
+bisection game that converges on a corrupted instruction, and an adjudication that names the
+liar without replaying the job. Then `cargo bench` regenerates the numbers above, including the
+ones that came out badly.
 
 ## Roadmap
 
 Cairn is being built in a deliberately short, fixed window, with a bias toward *narrow and
 finished* over *broad and abandoned*.
 
-**Today, what exists is the Rust verification kernel and nothing else.** The stack table
-above describes the design; only its `runtime/` row has been written. There is no Java
-source, no database schema, no browser worker and no dashboard in this repository. That is
-stated plainly rather than left implied by unticked boxes, because the first honest question
-anyone asks is *what can I actually run*, and the answer is `cargo test`.
+**What exists is the verification kernel and a command-line worker.** The stack table above
+describes the design; the Java coordinator, the database schema, the browser worker and the
+dashboard are not in this repository. That is stated plainly rather than left implied by
+unticked boxes.
 
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~9.4k lines of Rust, 197 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~10.5k lines of Rust, 206 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
-| Benchmarks + maintainer handover | **Done** — and the benchmark refuted a headline claim; see above |
+| Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
+| **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
 | Coordinator: domain model, schema, assignment, leases | Not started |
 | Verification policy: canaries, reputation, selective replication | Not started |
 | Browser volunteer node | Not started |
-| Native worker | Not started |
 | Dashboard + live globe | Not started |
 | A real scientific workload (molecular docking) | Not started |
 

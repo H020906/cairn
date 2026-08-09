@@ -240,7 +240,21 @@ and why that is sound.
 
 ---
 
-### 9 · Build the fast path · **L** · `help-wanted`
+### 9 · ~~Build the fast path~~ — **done natively; the browser half remains** · `help-wanted`
+
+> `worker-native/` exists. `cairn-worker run` executes a unit on wasmtime under
+> `Config::honest_path()`; `cairn-worker trace` produces a commitment on the interpreter;
+> `cairn-worker dispute` bisects two claimed executions and adjudicates. A smoke test asserts
+> the two paths agree on a real workload through the actual binary, which is the ADR-0005
+> assumption checked end to end rather than inside the differential harness.
+>
+> **What is left is the browser**, and it is a different job: a Web Worker, JS glue around the
+> engine already in the page, a CPU budget, and backing off on battery and metered connections.
+> No Rust engine work — the point of ADR-0005 is that the page's own engine is enough.
+
+<details><summary>Original issue</summary>
+
+### Build the fast path · **L** · `help-wanted`
 
 Everything in this repository describes two execution paths: a fast one (the host's own WASM
 engine) and a slow one (our interpreter, used only for arbitration). **Only the slow one
@@ -269,6 +283,8 @@ commitment.
 **Done when:** a contributor can run a work unit end to end from the command line, and the
 trace it emits on demand is accepted by `dispute::resolve` against one produced by the
 interpreter.
+
+</details>
 
 ---
 
