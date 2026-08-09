@@ -562,7 +562,7 @@ fn main() {
     );
 
     noise_floor(&measurements);
-    on_a_jit();
+    on_a_jit(&measurements);
 
     println!("\n## The two paths, after ADR-0005\n");
     println!(
@@ -629,7 +629,7 @@ fn main() {
 ///
 /// wasmtime is not a browser engine, but it is a real optimising compiler, so this is the
 /// first evidence about that path rather than speculation about it.
-fn on_a_jit() {
+fn on_a_jit(measurements: &[Measurement]) {
     println!("\n## On a JIT rather than the interpreter\n");
     println!(
         "wasmtime, compiling through Cranelift. Compilation and instantiation are outside the \
@@ -637,10 +637,12 @@ fn on_a_jit() {
          what a volunteer's own engine would pay — every other figure in this document is the \
          interpreter.\n"
     );
-    println!("| workload | honest path | full instrumentation |");
-    println!("|---|---:|---:|");
+    println!(
+        "| workload | honest path, JIT | honest path, interpreter | **interpreter ÷ JIT** | full instrumentation, JIT |"
+    );
+    println!("|---|---:|---:|---:|---:|");
 
-    for (name, source) in WORKLOADS {
+    for (index, (name, source)) in WORKLOADS.iter().enumerate() {
         let modules = vec![
             canonical(
                 source,
@@ -653,18 +655,30 @@ fn on_a_jit() {
             canonical(source, Config::default()),
         ];
         let times = race_jit(&modules);
+        let interpreted = measurements[index].honest;
         println!(
-            "| {} | {:+.0}% | {:+.0}% |",
+            "| {} | {:.1?} | {:.1?} | **{:.0}×** | {:+.0}% |",
             name,
-            (ratio(times[1], times[0]) - 1.0) * 100.0,
+            times[1],
+            interpreted,
+            ratio(interpreted, times[1]),
             (ratio(times[2], times[0]) - 1.0) * 100.0,
         );
     }
 
     println!(
-        "\nThe right-hand column runs only on a disputed unit. Note it against ADR-0004's \
-         guess that metering would cost *more* on a JIT than in the interpreter, because of \
-         the host-call boundary."
+        "\n**The `interpreter ÷ JIT` column is the one that prices a dispute.** A trace \
+         commitment covers the operand stack and every frame's locals, which no host engine \
+         exposes ([ADR-0005](adr/0005-the-fast-path-cannot-snapshot.md)), so a challenged party \
+         cannot produce one on the engine they ran the work with — they must re-execute under \
+         Cairn's interpreter. That ratio, not the instrumentation overhead, is what a dispute \
+         actually costs them."
+    );
+    println!(
+        "\nThe rightmost column is metering's cost on a compiler, and it is included because it \
+         is startling and because it is **not a cost anyone pays**: nothing runs the fully \
+         instrumented module on a JIT. See \
+         [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md)."
     );
 }
 

@@ -1,8 +1,22 @@
 # ADR-0007 — Metering is a compiler problem, and the interpreter was hiding it
 
-- **Status:** Accepted
+- **Status:** Accepted, **with its headline figure reinterpreted below**
 - **Date:** 2026-08-09
-- **Confirms and reinstates:** the remediation [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md) proposed and [ADR-0005](0005-the-fast-path-cannot-snapshot.md) withdrew — now scoped to the dispute path, and with evidence
+- **Confirms and reinstates:** the remediation [ADR-0004](0004-measured-cost-supersedes-the-efficiency-claim.md) proposed and [ADR-0005](0005-the-fast-path-cannot-snapshot.md) withdrew
+- **Corrected in part by:** [ADR-0008](0008-a-dispute-costs-an-interpreted-re-execution.md)
+
+> **The +505% below is real, and nobody pays it.** This ADR measured fuel metering on a JIT
+> without first asking who runs the fully instrumented module — and the answer is that no host
+> engine ever does, for the same reason ADR-0005 gives: a trace commitment covers the operand
+> stack and every frame's locals, which no JIT exposes. A challenged party re-executes under
+> **Cairn's interpreter**, where metering costs 18%–41%.
+>
+> The cost that dominates a dispute is the change of engine: the interpreter is **37×–142×**
+> slower than the JIT. See [ADR-0008](0008-a-dispute-costs-an-interpreted-re-execution.md).
+>
+> **This ADR's other conclusion is untouched, and it is the important one: the honest path
+> costs 0% on a real optimising compiler.** The reinstated metering fix is still correct, just
+> no longer urgent.
 
 ## Context
 

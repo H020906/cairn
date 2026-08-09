@@ -218,11 +218,25 @@ The number came back because the honest path now does almost nothing.
 **And then the numbers were checked on a real compiler ([ADR-0007](adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)),
 which is the part to internalise before trusting any figure here.** Under wasmtime the honest
 path costs **0%** — cleaner confirmation than the interpreter could give, because the
-interpreter is slow enough to absorb small overheads. But fuel metering, which the interpreter
-prices at 18%–41%, costs **five to six times** on the compiler: a host call is cheap next to
-interpreted arithmetic and expensive next to compiled arithmetic. That only affects disputed
-units, and it revived a fix ADR-0005 had withdrawn. **The engine you measure on is part of the
-measurement** — most of `docs/benchmarks.md` is the interpreter, and it says so per section.
+interpreter is slow enough to absorb small overheads. **The engine you measure on is part of
+the measurement**; most of `docs/benchmarks.md` is the interpreter, and it says so per section.
+
+**Then that ADR was itself corrected a day later, and the correction is the more useful lesson
+([ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md)).** ADR-0007 measured
+metering on a JIT at +505% without first asking *who runs the fully instrumented module*. The
+answer is nobody: a trace commitment needs machine state no host engine exposes — the same
+argument ADR-0005 makes — so a challenged party cannot produce a trace on their own engine
+either. They re-execute under Cairn's interpreter.
+
+So the number that prices a dispute is not instrumentation overhead at all. It is the change of
+engine: **37×–142×**, plus the bisection answers, for roughly **200× a normal execution per
+party per dispute**. That falls on the two parties, never on the coordinator, whose `O(log n)`
+claim is untouched — and it means **the dispute rate has a budget: below about 1 in 4,000
+units**. Canary sampling and reputation are therefore load-bearing for *cost*, not just for
+confidence.
+
+If you take one habit from this repository, take that one: before optimising a number, check
+who pays it.
 
 **The thing to be careful about here is `canon::escape_site`.** A missing entry is not a
 performance regression — it makes two honest workers disagree and the protocol convicts one of

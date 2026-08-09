@@ -84,7 +84,8 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | A NaN payload cannot change an answer | **Confirmed** across three engines, including a JIT, on 300 randomly generated float expressions. Checked for teeth: deleting one escape site makes it fail |
 | The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
 | Cairn beats replication on cost | **Yes, currently.** ≈1.11×–1.14× against replication's ≈2.0×, on all four workload shapes |
-| Arbitrating a dispute is cheap for the parties | **No.** Full instrumentation costs ≈5–6× on a compiler. It runs once, on one unit, only when challenged — but it is not free |
+| Arbitrating a dispute is cheap **for the coordinator** | **Confirmed.** `O(log n)` messages and one instruction, whatever the execution length |
+| Arbitrating a dispute is cheap **for the two parties** | **No — ≈200× a normal run each.** They must re-execute under Cairn's interpreter to produce a trace at all, and it is 37×–142× slower than the engine they did the work on |
 
 That last row took three reversals to get to, and none of them are hidden:
 
@@ -105,11 +106,18 @@ correct. Both facts are in the ADRs.
 
 A fourth reversal followed immediately, and it cuts the other way. Every figure above came from
 Cairn's interpreter. Running the same workloads on **wasmtime**, a real optimising compiler,
-confirms the honest path is free — and shows that fuel metering, which is now dispute-only,
-costs **five to six times** there against 18%–41% in the interpreter
-([ADR-0007](docs/adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)). A host
-call is cheap next to interpreted arithmetic and expensive next to compiled arithmetic. **The
+confirms the honest path is free — and showed fuel metering costing **five to six times** there
+against 18%–41% in the interpreter
+([ADR-0007](docs/adr/0007-metering-is-a-jit-problem-not-an-interpreter-problem.md)). **The
 engine you measure on is part of the measurement.**
+
+Then a fifth, from asking who actually runs that module — and the answer was nobody. A trace
+commitment covers the operand stack and every frame's locals, so a challenged party cannot
+produce one on their own engine any more than a volunteer could. **They re-execute under
+Cairn's interpreter, which is 37×–142× slower than the JIT they did the work on**
+([ADR-0008](docs/adr/0008-a-dispute-costs-an-interpreted-re-execution.md)). That is the real
+price of a dispute, it falls on the parties rather than the coordinator, and it puts a hard
+budget on how often disputes may happen — **below roughly 1 in 4,000 units.**
 
 **The benchmark measures its own error rather than asserting one**, by timing pairs of
 configurations that compile to byte-identical modules. When that error exceeds the effect, the

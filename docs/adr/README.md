@@ -17,7 +17,8 @@ done this way?"*
 | [0004](0004-measured-cost-supersedes-the-efficiency-claim.md) | What verification actually costs, and what that does to ADR-0001 | Accepted, corrected by 0005 |
 | [0005](0005-the-fast-path-cannot-snapshot.md) | The fast path cannot snapshot, so the trace moves to dispute time | Accepted |
 | [0006](0006-canonicalize-nans-at-escapes-on-the-honest-path.md) | Canonicalize NaNs where they can escape, not where they are made | Accepted |
-| [0007](0007-metering-is-a-jit-problem-not-an-interpreter-problem.md) | Metering is a compiler problem, and the interpreter was hiding it | Accepted |
+| [0007](0007-metering-is-a-jit-problem-not-an-interpreter-problem.md) | Metering is a compiler problem, and the interpreter was hiding it | Accepted, corrected by 0008 |
+| [0008](0008-a-dispute-costs-an-interpreted-re-execution.md) | A dispute costs the parties an interpreted re-execution | Accepted |
 
 ## Reading order
 
@@ -46,9 +47,17 @@ wrong reasons is still getting it wrong, and the record says so.
 
 Then **0007**, which ran the same measurements on a compiler instead of an interpreter and
 found the two disagree by an order of magnitude about what metering costs. It confirms the
-honest path is genuinely free — 0% on a real optimising compiler — and reinstates a fix that
-0005 had withdrawn. It is also the cleanest example in the repository of why the engine you
-measure on is part of the measurement.
+honest path is genuinely free — 0% on a real optimising compiler — and it is the cleanest
+example in the repository of why the engine you measure on is part of the measurement.
+
+Then **0008**, one day later, which asked who actually runs the module 0007 had been timing and
+found the answer was nobody. It corrects 0007's headline without touching its important half,
+and replaces it with the number that does matter: a dispute costs each party an interpreted
+re-execution, and the interpreter is 37×–142× slower than the JIT they ran the work on. That
+turns the dispute *rate* into a budget with an actual figure in it.
+
+If you read only two of these, read 0005 and 0008 — the two places where the project asked
+"but who is actually doing this?" and got an unwelcome answer.
 
 ## Format
 

@@ -112,7 +112,16 @@ your time measuring the validator.
 
 ---
 
-### 6b · Make metering cheap — now with evidence, and for the dispute path · **L** · `help-wanted`
+### 6b · Make metering cheap — for the dispute path, and no longer urgent · **L** · `help-wanted`
+
+> **Read [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md) before starting.**
+> The +505% figure below is real and nobody pays it: nothing runs the fully instrumented module
+> on a JIT, because a trace commitment needs machine state no host engine exposes. A challenged
+> party re-executes under Cairn's **interpreter**, where metering costs 18%–41% — and that is
+> dwarfed by the interpreter being 37×–142× slower than the JIT in the first place. The change
+> is still correct and still worth making. It is not the highest-value work any more.
+>
+> **If you want the change that actually reduces dispute cost, it is issue 6c.**
 
 `canon.rs` charges fuel by injecting `i32.const N; call $charge` at every basic block. In the
 interpreter that costs 18%–41%. **On wasmtime it costs +484% to +502%**
@@ -131,6 +140,29 @@ a submitted module must not be able to touch it — the same reservation rule th
 **Done when:** the JIT column in `docs/benchmarks.md` drops, the differential gate is still
 green across all three engines, and ADR-0007 gains a follow-up reporting the result **whether
 or not it improved**.
+
+---
+
+### 6c · Checkpoint the replay, and halve what a dispute costs · **M** · `help-wanted`
+
+`dispute::Replay` answers each bisection round by re-executing **from the beginning**, so a
+full bisection costs a party `O(n log n)`. The code says so where it happens; it was written
+that way because it is obviously correct and the protocol does not care.
+
+The protocol still does not care, which is what makes this safe: keep periodic *full-state*
+checkpoints — not the roots the trace commits to, the actual machine state — and resume from
+the nearest one below the requested step. That brings a bisection to `O(n)`.
+
+**Why it matters:** [ADR-0008](adr/0008-a-dispute-costs-an-interpreted-re-execution.md) prices
+a dispute at roughly 200× a normal execution per party, and about half of that is this. It is
+the largest single reduction available in dispute cost, and unlike the metering change it
+attacks the part that dominates.
+**Careful:** a checkpoint is a performance artefact and must never become a protocol artefact.
+Nothing the coordinator sees may depend on how often a party checkpoints, or two honest workers
+with different memory budgets would answer differently.
+**Done when:** replaying a 2-million-step execution answers a full bisection in time
+proportional to one execution rather than twenty, the existing dispute tests still pass
+unchanged, and a test pins that the answers are identical with and without checkpoints.
 
 ---
 
