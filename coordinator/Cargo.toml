@@ -1,0 +1,28 @@
+[package]
+name = "cairn-coordinator"
+description = "Dispatches work units to volunteers, collects results, and settles the disagreements"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The referee executes: adjudication rebuilds a machine from a state witness and steps it once.
+# That is why this crate is Rust — see docs/adr/0010.
+cairn-runtime = { path = "../runtime" }
+# A work unit's identity is the hash of its canonical bytes, and it must be the same hash the
+# runtime commits state with.
+blake3.workspace = true
+# Blocking, thread-per-request, small enough to read. Not tokio + axum, which would be a large
+# async stack for a server whose concurrency need is a handful of volunteers; not a hand-rolled
+# parser, which would put unvalidated parsing at the one boundary facing the internet — the
+# same reason `validate.rs` is fuzzed. See docs/adr/0010.
+tiny_http = "0.12"
+# Workloads are submitted as `.wat` as often as `.wasm`, and assembling before validation
+# keeps the tool usable without a WebAssembly toolchain installed.
+wat = "1.255.0"
+
+[lints]
+workspace = true

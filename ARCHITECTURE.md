@@ -244,7 +244,28 @@ The deterministic execution kernel. Two engines behind one interface:
 Also owns the Merkle trace commitment, the fuel meter, and the determinism validator that
 rejects a workload binary using a forbidden feature.
 
-### `server/` — Java 21 / Spring Boot 3
+### `coordinator/` — Rust · **built**
+Dispatches units, collects results, and settles the disagreements. `cargo run -p
+cairn-coordinator -- <workload> <inputs…>` and a volunteer can start contributing from a
+browser tab.
+
+**It is Rust rather than the Java below, because the referee executes.** Bisection is a pure
+state machine any language can drive, but adjudication rebuilds a machine from a state witness
+and steps it once — that is the execution kernel, called from the coordinator. A Java
+coordinator would need JNI, a subprocess, or a second implementation of consensus-critical
+code; the third is unthinkable and the other two buy nothing until there is a database to be
+transactional about. See [ADR-0010](docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md).
+
+What it has: registration through the admission gate, a work queue, leases that expire,
+one-volunteer-one-vote, a replication rate, and a referee. What it does not have: **a database,
+reputation, canaries, and the interactive dispute protocol.** A disagreement is settled by the
+referee executing the unit once itself — correct, but ordinary replication rather than
+bisection, and `grid.rs` says so at length where it happens.
+
+### `server/` — Java 21 / Spring Boot 3 · **superseded for now**
+The coordinator this describes is what Cairn wants when it has a database, transactions and
+reputation bookkeeping. [ADR-0010](docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md)
+suspends rather than overturns it, and records what moving back would cost.
 The coordinator. Work-unit lifecycle, lease management, result intake, canary injection,
 reputation, and the dispute referee. Virtual threads carry the WebSocket fan-in; there is
 no separate gateway service and no second backend language, because Java 21 does not need

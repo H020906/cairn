@@ -163,7 +163,7 @@ and an earlier version of this benchmark would have reported those numbers as fi
 
 | Layer | Choice | Why |
 |---|---|---|
-| Coordinator | **Java 21**, Spring Boot 3 | Virtual threads carry the connection fan-in without a second service |
+| Coordinator | **Rust**, `tiny_http` | **The referee executes** — adjudication steps a machine rebuilt from a state witness, so a Java coordinator would need JNI, a subprocess, or a second implementation of consensus-critical code. Java 21 + Spring is what it wants once there is a database; [ADR-0010](docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md) suspends that rather than overturning it |
 | Execution kernel | **Rust** | Deterministic interpretation and instruction-level replay; the JVM cannot do this |
 | Browser worker | **JavaScript**, no build step | Zero-install contribution inside a Web Worker, around the engine already in the page. Rust→WASM was the plan until ADR-0005 made it unnecessary |
 | Native worker | **Rust** + SQLite | Single binary, resumable, for donated machines |
@@ -177,7 +177,7 @@ others cannot. See [ADR-0002](docs/adr/0002-language-boundaries.md).
 
 ## Quick start
 
-**In a hurry, or want the guided version?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is five
+**In a hurry, or want the guided version?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is six
 commands in twenty minutes, each one answering a question, ending with a million-instruction
 disagreement settled by executing a single instruction.
 
@@ -215,7 +215,36 @@ and the one instruction the coordinator finally executes:
 cargo run --example dispute
 ```
 
-Or contribute from a browser tab, with no Rust at all:
+### The whole system, in one command
+
+```bash
+cargo run -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+  workloads/examples/input-a.bin workloads/examples/input-b.bin
+```
+
+Open the address it prints and press **Start contributing**. The tab takes a unit, runs it on
+the browser's own engine, reports the answer *and how many instructions it took*, and asks for
+another. Open a second tab and the two confirm each other's work — units go from `open` to
+`accepted` once a quorum of **different** volunteers agrees.
+
+Feed it a liar and watch it get caught:
+
+```bash
+curl -s "http://127.0.0.1:8080/api/lease?worker=liar"
+curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbeefdeadbeef
+```
+
+```json
+{"state":"settled","verdict":"the second party was wrong","output":"bd3e5cfce4250000"}
+```
+
+**What that verdict is and is not:** the coordinator settled it by executing the unit once
+itself. That is correct, and it is ordinary replication rather than the bisection this project
+is about — the bisection needs the two parties to answer questions over a network, and there is
+no protocol for asking yet. `coordinator/src/grid.rs` says so where it happens, at length,
+because a gap described wrongly is worse than a gap.
+
+### Or just the browser worker, with no coordinator
 
 ```bash
 node browser/server.js
@@ -247,9 +276,11 @@ came out badly.
 Cairn is being built in a deliberately short, fixed window, with a bias toward *narrow and
 finished* over *broad and abandoned*.
 
-**What exists is the verification kernel and the two workers.** The stack table above describes
-the design; the Java coordinator, the database schema and the dashboard are not in this
-repository. That is stated plainly rather than left implied by unticked boxes.
+**What exists is the verification kernel, two workers, and a coordinator that ties them into a
+system.** What is not here: a database, reputation, canaries, a dashboard, a real scientific
+workload, and — the one that matters most — **the interactive dispute protocol**, without which
+a disagreement is settled by the referee re-executing rather than by bisection. That is stated
+plainly rather than left implied by unticked boxes.
 
 | Milestone | Status |
 |---|---|
@@ -259,8 +290,9 @@ repository. That is stated plainly rather than left implied by unticked boxes.
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
 | **Browser volunteer** | **Done** — a Web Worker around the page's own engine; no install, no dependencies, no build step |
-| Coordinator: domain model, schema, assignment, leases | Not started |
-| Verification policy: canaries, reputation, selective replication | Not started |
+| **Coordinator: registration, queue, leases, quorum, referee** | **Done** — Rust, in memory, no database; the system runs end to end |
+| Coordinator: persistence, heartbeats, the interactive dispute protocol | Not started |
+| Verification policy: canaries, reputation | Not started — the replication rate exists, the rest does not |
 | Dashboard + live globe | Not started |
 | A real scientific workload (molecular docking) | Not started |
 

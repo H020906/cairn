@@ -1,7 +1,19 @@
 # ADR-0002 — Language boundaries: Java for coordination, Rust for execution, no third
 
-- **Status:** Accepted
+- **Status:** Accepted, **with the coordinator's language suspended by
+  [ADR-0010](0010-the-referee-executes-so-the-coordinator-is-rust.md)**
 - **Date:** 2026-08-07
+
+> **The consequence below about "exactly one narrow seam" is wrong, and it is wrong in a way
+> that changed what got built.** It was written before the dispute protocol existed. The
+> coordinator is the referee, and refereeing means *executing an instruction* — adjudication
+> rebuilds a machine from a state witness and steps it once. So the boundary is not a wire
+> format; it is the coordinator calling the execution kernel.
+>
+> The coordinator is therefore Rust for now. Everything else here — Rust for execution,
+> TypeScript for the web surface, no Go — is untouched, and the Java decision is *suspended*
+> rather than overturned, with the trigger for revisiting it written down. See
+> [ADR-0010](0010-the-referee-executes-so-the-coordinator-is-rust.md).
 
 ## Context
 

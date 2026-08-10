@@ -88,6 +88,14 @@ jobs:
             workloads/examples/rust/target/wasm32-unknown-unknown/release/cairn_workload_example.wasm \
             workloads/examples/input-a.bin
 
+      - name: The coordinator's decisions
+        # The coordinator is the one component that can convict an honest volunteer, so its
+        # decisions live in `grid.rs` with no HTTP in them and are tested without a socket. The
+        # load-bearing one: a worker is never given the same unit twice, because a quorum of two
+        # means two *independent* executions and a unit replicated back to the same machine
+        # would agree with itself however broken that machine was.
+        run: cargo test -p cairn-coordinator
+
       - name: The worked example still works
         # `cargo run --example dispute` is the ten-minute version of this project, and a
         # document that has stopped running is worse than no document. It is cheap, it exercises

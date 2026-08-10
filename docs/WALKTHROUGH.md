@@ -1,6 +1,6 @@
 # Cairn in twenty minutes
 
-Five commands. Each one answers a question, and by the last you will have watched a
+Six commands. Each one answers a question, and by the last you will have watched a
 million-instruction disagreement settled by executing a single instruction.
 
 You need Rust. Node only for the last one.
@@ -143,7 +143,43 @@ own engine cannot produce a commitment. Under controlled measurement that costs 
 
 ---
 
-## 5 · Contribute from a browser tab
+## 5 · The whole system
+
+```bash
+cargo run -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+  workloads/examples/input-a.bin workloads/examples/input-b.bin
+```
+
+Open the printed address, press **Start contributing**, then open a *second* tab and do the
+same. Two volunteers, and the units go from `open` to `accepted` as they confirm each other:
+
+```
+unit   0     0.90 ms       850,022 instructions  → open
+unit   1     0.40 ms       850,022 instructions  → open
+```
+
+`open` because a replicated unit needs a **different** volunteer. The coordinator will not hand
+one machine the same unit twice — a quorum of two means two independent executions, and a unit
+replicated back to the same machine would agree with itself however broken that machine was.
+That one rule is the load-bearing line in the scheduler.
+
+Now be the liar:
+
+```bash
+curl -s "http://127.0.0.1:8080/api/lease?worker=liar"
+curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbeefdeadbeef
+```
+
+```json
+{"state":"settled","verdict":"the second party was wrong","output":"bd3e5cfce4250000"}
+```
+
+**Read that verdict carefully, because it is not the mechanism.** The coordinator settled it by
+executing the unit once itself. Correct, but ordinary replication — the bisection needs the two
+parties to answer questions over a network, and there is no protocol for asking yet.
+`coordinator/src/grid.rs` says exactly that, where it happens.
+
+## 6 · Just the browser worker, with no coordinator
 
 ```bash
 node browser/server.js      # then open http://127.0.0.1:8787

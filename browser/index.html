@@ -51,7 +51,23 @@
   <div class="verdict" id="verdict">reading…</div>
 </section>
 
-<h2>Do a unit</h2>
+<h2>Contribute to a coordinator</h2>
+<section>
+  <div class="controls">
+    <button id="contribute">Start contributing</button>
+    <button id="pause" disabled>Stop</button>
+    <span id="contributed"></span>
+  </div>
+  <pre id="feed">Not connected. This needs a coordinator on the same origin —
+
+    cargo run -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+      workloads/examples/input-a.bin workloads/examples/input-b.bin
+
+then open the address it prints. Opening this page from `node server.js` instead
+gives you the single-unit demonstration below, with no coordinator behind it.</pre>
+</section>
+
+<h2>Or do one unit by hand</h2>
 <section>
   <div class="controls">
     <select id="unit">
@@ -83,6 +99,7 @@
 <script type="module">
 import { readEnvironment } from './environment.js';
 import { decide, DEFAULT_SHARE } from './policy.js';
+import { doOneUnit } from './coordinator.js';
 
 const $ = (id) => document.getElementById(id);
 const out = $('out');
@@ -119,7 +136,66 @@ async function refreshEnvironment() {
 refreshEnvironment();
 document.addEventListener('visibilitychange', refreshEnvironment);
 
-// --- doing a unit --------------------------------------------------------------------------
+// --- contributing to a coordinator ---------------------------------------------------------
+
+// A name, not an identity. The coordinator uses it to avoid giving one machine the same unit
+// twice, which is what makes a quorum of two mean two *independent* executions. It is not
+// authentication and the coordinator does not pretend otherwise.
+const NAME = `browser-${Math.random().toString(36).slice(2, 8)}`;
+
+// How long to wait when the coordinator says there is nothing to do. Long enough that an idle
+// volunteer is not a load on it, short enough that new work is picked up while somebody is
+// still looking at the page.
+const IDLE_WAIT = 2000;
+
+let contributing = false;
+let done = 0;
+
+$('contribute').addEventListener('click', async () => {
+  contributing = true;
+  $('contribute').disabled = true;
+  $('pause').disabled = false;
+  $('feed').textContent = `Contributing as ${NAME}…\n`;
+
+  while (contributing) {
+    let result;
+    try {
+      result = await doOneUnit('', NAME);
+    } catch (error) {
+      // A coordinator that has gone away is not a crash. Say so, stop, and let the person
+      // decide — a volunteer that retried forever against a dead server would be a bad guest.
+      $('feed').textContent += `\nStopped: ${error.message}\n`;
+      break;
+    }
+
+    if (result.idle) {
+      $('feed').textContent += done ? '' : 'Nothing to do yet…\n';
+      await new Promise((r) => setTimeout(r, IDLE_WAIT));
+      continue;
+    }
+
+    done += 1;
+    const state = result.outcome.state;
+    const fuel = result.fuel === null ? '—' : Number(result.fuel).toLocaleString();
+    $('feed').textContent +=
+      `unit ${String(result.unit).padStart(3)}  ` +
+      `${result.milliseconds.toFixed(2).padStart(7)} ms  ` +
+      `${fuel.padStart(12)} instructions  ` +
+      `→ ${state}${state === 'settled' ? `: ${result.outcome.verdict}` : ''}\n`;
+    $('contributed').textContent = `${done} unit${done === 1 ? '' : 's'} done`;
+  }
+
+  contributing = false;
+  $('contribute').disabled = false;
+  $('pause').disabled = true;
+});
+
+$('pause').addEventListener('click', () => {
+  contributing = false;
+  $('feed').textContent += '\nStopped by you. Any unit in flight is lost and will be reassigned.\n';
+});
+
+// --- doing a single unit by hand -------------------------------------------------------------
 
 let worker = null;
 let nextId = 1;

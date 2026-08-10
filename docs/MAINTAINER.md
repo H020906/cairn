@@ -2,7 +2,7 @@
 
 *A note for whoever picks this up. Written by the person who put it down.*
 
-Last updated: 2026-08-08, at commit `78cba4e` + the ADR-0005 change.
+Last updated: 2026-08-10, at commit `aaf4375` + the coordinator.
 
 ---
 
@@ -12,15 +12,17 @@ Cairn is meant to be volunteer computing (BOINC, Folding@home) without the two c
 have followed it since 2002: you must install a client, and the network burns a third to a
 half of its power re-running work that was already correct.
 
-The second cost is the interesting one, and it is the only part of Cairn that exists today.
-The idea: instead of running every job twice and comparing answers, run it **once**, have
-the worker commit to a Merkle root over its own execution, and when two workers disagree,
-**binary-search their commitments down to the single instruction where they first
-diverged** and re-execute only that. The mechanism is an optimistic rollup's fraud proof,
-pointed at science instead of finance.
+The second cost is the interesting one. The idea: instead of running every job twice and
+comparing answers, run it **once**, have the worker commit to a Merkle root over its own
+execution, and when two workers disagree, **binary-search their commitments down to the single
+instruction where they first diverged** and re-execute only that. The mechanism is an
+optimistic rollup's fraud proof, pointed at science instead of finance.
 
-**That mechanism is built, tested, and measured.** Everything else in this repository is
-prose describing what would be built around it.
+**That mechanism is built, tested and measured, and there is now a system around it** — a
+coordinator, two workers, and a work queue between them. What the system does *not* have is
+the mechanism wired into it: a disagreement is currently settled by the referee re-executing
+the unit, because bisection needs the two parties to answer questions over a network and there
+is no protocol for asking. §3 is precise about that, and so is `coordinator/src/grid.rs`.
 
 ---
 
@@ -33,7 +35,7 @@ machine in about two minutes:
 cargo test --workspace
 ```
 
-197 tests: 184 unit, 11 differential, 2 doc. If they are green, the following is true.
+248 tests. If they are green, the following is true.
 
 **You can take an untrusted WebAssembly module and make it deterministic.** `validate.rs`
 rejects anything with a host-dependent escape (threads, SIMD, reference types, any import
@@ -63,14 +65,23 @@ cost argument — see §6.
 
 Be clear-eyed about this, because README and ARCHITECTURE describe a whole system:
 
-- **No Java.** No coordinator, no domain model, no REST or WebSocket surface. `server/` is
-  not a directory that exists.
+- **No Java.** `server/` is not a directory that exists, and
+  [ADR-0010](adr/0010-the-referee-executes-so-the-coordinator-is-rust.md) explains why the
+  coordinator that does exist is Rust: **the referee executes**, so a Java one would need JNI, a
+  subprocess, or a second implementation of consensus-critical code.
 - **No database.** No schema, no migrations. `docker-compose.yml` will start PostgreSQL and
-  Redis for you and nothing will connect to them.
-- **No dashboard.** `web/` does not exist.
-- **The browser worker exists but has nothing to talk to.** `browser/` runs a unit that is
-  already in front of it, and everything a volunteer does once a unit is in hand is there and
-  works. Fetching one, leases, heartbeats and reporting are all coordinator-shaped and absent.
+  Redis for you and nothing will connect to them. The coordinator's state is in memory and dies
+  with the process.
+- **No dashboard.** `web/` does not exist. `GET /api/status` is what there is.
+- **The coordinator exists but is not the one ARCHITECTURE originally described.**
+  `coordinator/` has registration, a work queue, expiring leases, one-volunteer-one-vote, a
+  replication rate and a referee. It has **no reputation, no canaries, and no interactive
+  dispute protocol** — a disagreement is settled by the referee re-executing the unit, which is
+  correct but is ordinary replication rather than bisection. **That gap is the most quotable
+  thing in the repository**, and `coordinator/src/grid.rs` spends a screen of prose making sure
+  it gets quoted right. Closing it needs a question/answer channel: an endpoint where a party
+  holding an open dispute is asked for `root_at(step)` and answers from a `Replay`.
+  `dispute::resolve` is already generic over `Claimant`, so nothing in `runtime/` changes.
 - **No real workload.** The molecular-docking target is an intention;
   `workloads/examples/sum-of-squares.wat` is a demonstration fixture, not science.
 
@@ -86,8 +97,12 @@ And one thing that *does* exist and is the fastest way in:
 - **`cargo run --example dispute` — the ten-minute version.** Every bisection round printed,
   ending in the one instruction the coordinator executes. Read this before `dispute.rs`, not
   after.
-- **[WALKTHROUGH.md](WALKTHROUGH.md) — the twenty-minute version.** Five commands with their
+- **[WALKTHROUGH.md](WALKTHROUGH.md) — the twenty-minute version.** Six commands with their
   real output. If you are handing this project to someone, hand them that.
+- **`cargo run -p cairn-coordinator -- workloads/examples/sum-of-squares.wat workloads/examples/input-a.bin`
+  — the system, rather than a demonstration of it.** Open the printed address, press *Start
+  contributing*, open a second tab. Two volunteers confirming each other's work is the shortest
+  answer to "so what does this actually do?"
 
 `CONTRIBUTING.md` lists JDK, Node and Docker as setup requirements. Today you need Rust, and
 node only if you want the browser worker.
@@ -112,7 +127,7 @@ node only if you want the browser worker.
 | 12 | `runtime/benches/cost.rs` | ~900 | What verification costs — the *reporting* instrument, run by hand |
 | 13 | `runtime/tests/exact_costs.rs` | ~290 | The same costs, the exact ones only — the *gate*, run by CI |
 
-Then the four ADRs in [docs/adr/](adr/), in numerical order. ADR-0001 is the thesis;
+Then the ADRs in [docs/adr/](adr/), in the order that file suggests. ADR-0001 is the thesis;
 ADR-0004 is the measurement that took a bite out of it.
 
 ---

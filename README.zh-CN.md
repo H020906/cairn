@@ -149,7 +149,7 @@ flowchart LR
 
 | 层 | 选择 | 为什么 |
 |---|---|---|
-| 协调器 | **Java 21**、Spring Boot 3 | 虚拟线程能扛住连接的扇入，不需要再加一个服务 |
+| 协调器 | **Rust**、`tiny_http` | **裁判要执行指令**——裁决要把机器从状态见证里重建出来再走一步，所以 Java 协调器要么用 JNI、要么起子进程、要么把共识关键代码实现第二遍。等到有了数据库，它想要的仍然是 Java 21 + Spring；[ADR-0010](docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md) 是**暂缓**而不是推翻 |
 | 执行内核 | **Rust** | 确定性解释和指令级重放；JVM 做不了这个 |
 | 浏览器 worker | **JavaScript**，零构建 | 在 Web Worker 里零安装贡献，包在页面已有的引擎外面。Rust→WASM 一直是计划，直到 ADR-0005 让它变得没必要 |
 | 原生 worker | **Rust** + SQLite | 单个二进制、可续跑，给捐出来的机器用 |
@@ -162,7 +162,7 @@ flowchart LR
 
 ## 快速开始
 
-**赶时间，或者想要带讲解的版本？**[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) 是二十分钟五条命令，
+**赶时间，或者想要带讲解的版本？**[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) 是二十分钟六条命令，
 每一条回答一个问题，最后以"一场一百万条指令的分歧被执行一条指令解决"收尾。（英文）
 
 否则：只装 Rust，别的都不用。做一个工作单元：
@@ -200,7 +200,34 @@ Verdict: the second party was wrong.
 cargo run --example dispute
 ```
 
-或者从一个浏览器标签页贡献算力，完全不需要 Rust：
+### 整个系统，一条命令
+
+```bash
+cargo run -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+  workloads/examples/input-a.bin workloads/examples/input-b.bin
+```
+
+打开它打印出来的地址，点 **Start contributing**。这个标签页会领一个单元、用浏览器自己的引擎跑掉、
+把答案**和它花了多少条指令**报回去，然后再要一个。再开一个标签页，两个志愿者就会互相确认——
+一个单元要等**不同的**志愿者达成共识，才会从 `open` 变成 `accepted`。
+
+喂它一个说谎者，看它被抓：
+
+```bash
+curl -s "http://127.0.0.1:8080/api/lease?worker=liar"
+curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbeefdeadbeef
+```
+
+```json
+{"state":"settled","verdict":"the second party was wrong","output":"bd3e5cfce4250000"}
+```
+
+**这个判决是什么、不是什么**：协调器是**自己把这个单元跑了一遍**来定的。这是对的，但它是普通的
+冗余复算，**不是**这个项目讲的那套二分——二分需要争议双方隔着网络回答提问，而"怎么问"这个协议
+还不存在。`coordinator/src/grid.rs` 在发生这件事的地方长篇写明了这一点，因为**把缺口描述错，
+比缺口本身更糟**。
+
+### 或者只跑浏览器 worker，不带协调器
 
 ```bash
 node browser/server.js
@@ -227,8 +254,9 @@ cargo test --workspace
 
 Cairn 是在一个刻意压短、写死的时间窗里建的，取向是**窄而完成**，而不是**宽而烂尾**。
 
-**存在的是验证内核和两个 worker。** 上面的技术栈表描述的是设计；Java 协调器、数据库 schema
-和面板不在这个仓库里。这一点被直说出来，而不是靠没打勾的复选框暗示。
+**存在的是验证内核、两个 worker，以及一个把它们串成系统的协调器。** 不在这里的：数据库、信誉、
+诱饵任务、面板、真实科学负载，以及最要紧的那一个——**交互式争议协议**。没有它，一次分歧是靠
+裁判重新执行来定的，而不是靠二分。这一点被直说出来，而不是靠没打勾的复选框暗示。
 
 | 里程碑 | 状态 |
 |---|---|
@@ -238,8 +266,9 @@ Cairn 是在一个刻意压短、写死的时间窗里建的，取向是**窄而
 | 基准测试 + 维护者交接 | **完成**——而且基准推翻了三条头条主张；见上文 |
 | **原生 worker** | **完成**——`cairn-worker`，在 JIT 上跑一个单元，并端到端了结一场争议 |
 | **浏览器志愿者** | **完成**——包在页面自身引擎外面的 Web Worker；零安装、零依赖、零构建 |
-| 协调器：领域模型、schema、分派、租约 | 未开始 |
-| 验证策略：诱饵、信誉、选择性复算 | 未开始 |
+| **协调器：注册、队列、租约、法定人数、裁判** | **完成**——Rust，内存态，无数据库；系统端到端跑得通 |
+| 协调器：持久化、心跳、交互式争议协议 | 未开始 |
+| 验证策略：诱饵、信誉 | 未开始——复算率有了，其余没有 |
 | 面板 + 实时地球仪 | 未开始 |
 | 一个真实的科学负载（分子对接） | 未开始 |
 
@@ -256,7 +285,7 @@ Cairn 是在一个刻意压短、写死的时间窗里建的，取向是**窄而
   每一条都说明从哪里下手、怎么知道自己做完了。**现在全部关闭**——这一页变成了"每一条实际教会了
   什么"的记录，而那比工单本身值钱：四条的结局和当初写的不一样，其中一条完全相反，还有一条在
   被写下来之前就已经做完了。
-- **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)**——二十分钟五条命令，配真实输出，最后给一条
+- **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)**——二十分钟六条命令，配真实输出，最后给一条
   阅读顺序。要把这个项目交给别人，就交这一份。
 - **[docs/WORKLOADS.md](docs/WORKLOADS.md)**——怎么写一个 Cairn 能跑的程序：完整的接口、
   一个能用的例子（WAT 和 Rust 各一个），以及每一条拒绝背后的确定性理由。
