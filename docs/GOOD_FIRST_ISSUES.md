@@ -402,8 +402,9 @@ and why that is sound.
 > The three engines agree exactly on the bundled unit: Chromium, wasmtime and Cairn's
 > interpreter all answer `bd3e5cfce4250000`, and the two that were asked for an instruction
 > count both say **850,022** — one by reading an exported global, the other by counting host
-> calls. The page finishes in 2.5 ms where the interpreter takes 167 ms, a factor of 67 inside
-> the 37×–142× band ADR-0008 measured on a different engine.
+> calls. **That agreement is the claim, and it is exact.** The page's *timing* is not a
+> controlled measurement and `browser/README.md` says so at length — an earlier version of that
+> file quoted a figure that was wrong twice over, and the two errors nearly cancelled.
 >
 > `cairn-worker prepare` was added for it: the coordinator's job, done once at registration,
 > writing the canonical binary every volunteer then runs unchanged. A browser volunteer needs

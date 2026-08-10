@@ -65,6 +65,26 @@ game — binary-searching those commitments down to **the single machine instruc
 their executions first diverged** — and the coordinator executes that one instruction to
 find out who lied.
 
+```mermaid
+flowchart LR
+    U["work unit"] --> V["volunteer runs it once<br/>on their own engine"]
+    V --> R["result"]
+    R --> Q{"did a second<br/>result differ?"}
+    Q -->|"almost always: no"| A["accepted"]
+    Q -->|"rarely: yes"| D["both parties commit<br/>to their own executions"]
+    D --> B["bisection:<br/>log₂ n rounds"]
+    B --> I["one instruction"]
+    I --> J["coordinator executes<br/>that instruction — once"]
+    J --> W["the liar is named"]
+
+    style A stroke-width:3px
+    style W stroke-width:3px
+```
+
+**Read the diagram by how thick the traffic is, not by how many boxes there are.** Almost every
+unit takes the top row and stops. The machinery underneath exists so that the top row can be
+one execution instead of two or three — and it runs only when somebody actually disagrees.
+
 Checking one instruction instead of a billion. `O(log n)` messages, and work that does not
 grow with how long the disputed job ran — arbitrating a trillion-instruction unit costs what
 arbitrating a thousand-instruction one costs.
@@ -157,7 +177,11 @@ others cannot. See [ADR-0002](docs/adr/0002-language-boundaries.md).
 
 ## Quick start
 
-Rust, and nothing else installed. Do a work unit:
+**In a hurry, or want the guided version?** [docs/WALKTHROUGH.md](docs/WALKTHROUGH.md) is five
+commands in twenty minutes, each one answering a question, ending with a million-instruction
+disagreement settled by executing a single instruction.
+
+Otherwise: Rust, and nothing else installed. Do a work unit:
 
 ```bash
 cargo run -p cairn-worker -- run workloads/examples/sum-of-squares.wat workloads/examples/input-a.bin
@@ -197,12 +221,13 @@ Or contribute from a browser tab, with no Rust at all:
 node browser/server.js
 ```
 
-The page runs the same unit on the engine your browser already has — **2.5 ms against the
-interpreter's 153 ms** — and reports **850,022 instructions**, exactly the number Cairn's
-interpreter reports for **the same bytes**, reached by reading a counter the module exports
-rather than by being told. There is no WebAssembly engine in [`browser/`](browser) and there is
-not supposed to be; see [its README](browser/README.md) for why that is the design and not a
-shortcut.
+The page runs the same unit on the engine your browser already has, and reports **850,022
+instructions** — exactly the number Cairn's interpreter reports for **the same bytes**, reached
+by reading a counter the module exports rather than by being told. That agreement is the point,
+and it is exact; the page's timing is not a controlled measurement and
+[its README](browser/README.md) says so. There is no WebAssembly engine in
+[`browser/`](browser) and there is not supposed to be — same README for why that is the design
+and not a shortcut.
 
 To check the claims on this page rather than take them:
 

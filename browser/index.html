@@ -190,7 +190,7 @@ function finish() {
   $('stop').disabled = true;
 }
 
-function report({ output, fuel, milliseconds }) {
+function report({ output, fuel, milliseconds, rounds }) {
   const bytes = new Uint8Array(output);
   const hex = [...bytes].map((b) => b.toString(16).padStart(2, '0')).join('');
   // The example workload writes a little-endian i64, which is what a result looks like when a
@@ -199,7 +199,11 @@ function report({ output, fuel, milliseconds }) {
 
   const lines = [
     `engine     ${navigator.userAgent.includes('Firefox') ? 'SpiderMonkey' : 'the browser\'s own'} — compiled, not interpreted`,
-    `time       ${milliseconds.toFixed(1)} ms`,
+    // Not one call. performance.now() is clamped to ~0.1 ms, and a JIT's first call includes
+    // compilation, so a single timing of a small unit is either at the resolution floor or is
+    // mostly warm-up. The label says what the number is, because a number whose provenance is
+    // hidden is worse than no number.
+    `time       ${milliseconds.toFixed(3)} ms per unit  (mean of ${rounds}, warmed)`,
     `result     ${bytes.length} bytes  0x${hex}`,
   ];
   if (value !== null) lines.push(`           = ${value}`);

@@ -86,6 +86,8 @@ And one thing that *does* exist and is the fastest way in:
 - **`cargo run --example dispute` — the ten-minute version.** Every bisection round printed,
   ending in the one instruction the coordinator executes. Read this before `dispute.rs`, not
   after.
+- **[WALKTHROUGH.md](WALKTHROUGH.md) — the twenty-minute version.** Five commands with their
+  real output. If you are handing this project to someone, hand them that.
 
 `CONTRIBUTING.md` lists JDK, Node and Docker as setup requirements. Today you need Rust, and
 node only if you want the browser worker.

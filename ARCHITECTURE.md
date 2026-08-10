@@ -139,17 +139,20 @@ sequenceDiagram
 The coordinator's work is **one instruction**, not N: `O(log N)` messages, and compute that
 does not grow with the length of the disputed execution.
 
-**For the coordinator.** The two parties pay something quite different, and it is worth being
-exact about who bears what. A trace commitment covers machine state no host engine exposes, so
-a challenged party cannot produce one on the engine they did the work with — they re-execute
-under Cairn's interpreter, which measures **37×–142×** slower. Including the bisection answers
-that is roughly **200× a normal execution, per party, per dispute**. It is bounded, it is rare,
-it never touches the coordinator's scaling — and it puts a real budget on the dispute rate.
-[ADR-0008](docs/adr/0008-a-dispute-costs-an-interpreted-re-execution.md) does that arithmetic. It can execute that instruction
-without replaying anything because the parties supply a **state witness** — the small parts of
-the machine whole, and memory as only the pages that instruction touches, each with a Merkle
-proof binding it to the state root bisection established. This is the same skeleton as an
-optimistic rollup's fraud proof, applied to scientific computation instead of financial state.
+It can execute that instruction without replaying anything because the parties supply a **state
+witness** — the small parts of the machine whole, and memory as only the pages that instruction
+touches, each with a Merkle proof binding it to the state root bisection established. This is
+the same skeleton as an optimistic rollup's fraud proof, applied to scientific computation
+instead of financial state.
+
+**All of that is the coordinator's cost. The two parties pay something quite different**, and it
+is worth being exact about who bears what. A trace commitment covers machine state no host
+engine exposes, so a challenged party cannot produce one on the engine they did the work with —
+they re-execute under Cairn's interpreter, which measures **37×–142×** slower. Including the
+bisection answers that is roughly **200× a normal execution, per party, per dispute**. It is
+bounded, it is rare, it never touches the coordinator's scaling — and it puts a real budget on
+the dispute rate, below about 1 in 4,000 units.
+[ADR-0008](docs/adr/0008-a-dispute-costs-an-interpreted-re-execution.md) does that arithmetic.
 
 ### 2.4 Why this is the whole project
 

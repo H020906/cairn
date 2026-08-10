@@ -91,7 +91,7 @@ cargo run -p cairn-worker -- trace browser/units/sum-of-squares.wasm workloads/e
 
 ```
 instrumented  as received — already canonical, not re-instrumented
-time          153.2ms
+time          18.7ms
 steps         1250038
 fuel          850022
 result        bd3e5cfce4250000
@@ -103,15 +103,29 @@ result        bd3e5cfce4250000
 | `cairn-worker trace` | Cairn's interpreter, the same bytes | `bd3e5cfce4250000` | **850,022** |
 | `cairn-worker run` | wasmtime, the unmetered module | `bd3e5cfce4250000` | — |
 
-A browser and an interpreter written five years apart in two languages, reading a counter the
-module keeps for itself, reaching the same number. That number was unobtainable from a browser
-at any acceptable price until [ADR-0009](../docs/adr/0009-metering-through-a-global-the-engines-disagree.md);
-it cost a host call per basic block, and a compiler charges +540% for those.
+A browser and an interpreter written in two languages, reading a counter the module keeps for
+itself, reaching the same number. **That is the claim this page exists to demonstrate**, and it
+is exact — no error bar, no run-to-run variation, the same on every machine. It was unobtainable
+from a browser at any acceptable price until
+[ADR-0009](../docs/adr/0009-metering-through-a-global-the-engines-disagree.md): it cost a host
+call per basic block, and a compiler charges +540% for those.
 
-The page finished in **2.5 ms** where the interpreter took **153 ms**: a factor of **61**,
-inside the 37×–142× band [ADR-0008](../docs/adr/0008-a-dispute-costs-an-interpreted-re-execution.md)
-measured on a different engine entirely. That factor is what a dispute costs the parties, and
-it is the reason disputes have to stay rare.
+### About the timing, which is the part not to quote
+
+The page reports **0.71 ms per unit** (mean of 30, warmed) against the interpreter's 18.7 ms in
+a release build — roughly 26×, inside the 37×–142× band
+[ADR-0008](../docs/adr/0008-a-dispute-costs-an-interpreted-re-execution.md) measured under
+controlled conditions.
+
+**Neither of those is a controlled measurement, and an earlier version of this file quoted a
+figure that was wrong twice over.** It said 2.5 ms against 153 ms — 61× — where the 2.5 ms was a
+single cold call sitting at `performance.now()`'s ~0.1 ms resolution floor, and the 153 ms was a
+**debug** build of the interpreter. Two errors in opposite directions landed the ratio in
+roughly the right neighbourhood, which is the most dangerous way to be wrong.
+
+The page now warms up and times a batch, and labels the number as what it is. If you want a
+figure to rely on, take it from `cargo bench`, which interleaves, rotates, and measures its own
+error. **What this page demonstrates is agreement, not speed.**
 
 `steps` is 1,250,038 rather than the 1,050,030 the host-call encoding reports, and that gap is
 supposed to be there: four injected instructions per charge site instead of two. Fuel is the
