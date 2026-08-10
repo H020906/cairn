@@ -49,6 +49,7 @@ use cairn_runtime::dispute::Party;
 use crate::dispute::{Answer, Conclusion, Dispute, Question};
 use crate::grid::{Grid, Outcome, Submission};
 use crate::journal::{Entry, Journal};
+use crate::reputation::Standing;
 
 /// Serve until killed.
 ///
@@ -99,6 +100,7 @@ fn handle(
         }
         "/api/challenge" => challenge(grid, request, &url),
         "/api/status" => status(grid, request),
+        "/api/reputation" => reputation(grid, request),
         "/api/disputes" => disputes(grid, request),
         p if p.starts_with("/api/module/") => module(grid, request, p, &url),
         _ => match web_root {
@@ -121,6 +123,16 @@ fn handle(
 /// not come back and convict a volunteer for the coordinator's crash. See
 /// [`crate::journal`].
 fn entries_for(grid: &Grid, unit: usize, submission: &Submission, outcome: &Outcome) -> Vec<Entry> {
+    // A canary is not queued work and cannot be reconstructed, so recording it as an `Answered`
+    // for a unit index the journal never queued would make a restarted coordinator refuse the
+    // file. What is worth keeping is what the check established about the worker.
+    if let Some(canary) = grid.unit(unit).and_then(|held| held.canary.as_ref()) {
+        return vec![Entry::Canary {
+            worker: submission.worker.clone(),
+            passed: submission.output == canary.expected,
+        }];
+    }
+
     let mut entries = vec![Entry::Answered {
         unit,
         worker: submission.worker.clone(),
@@ -633,6 +645,50 @@ fn status(grid: &Arc<Mutex<Grid>>, request: Request) -> Result<(), String> {
             })
             .collect();
         format!("[{}]", units.join(","))
+    };
+    respond(request, 200, "application/json", body.into_bytes())
+}
+
+/// What the coordinator has observed about its volunteers.
+///
+/// Read-only and deliberately complete: a volunteer is entitled to see the record being kept
+/// about it, including the number that decides how often it is checked. A reputation system
+/// nobody can inspect is one nobody can dispute.
+fn reputation(grid: &Arc<Mutex<Grid>>, request: Request) -> Result<(), String> {
+    let body = {
+        let grid = grid.lock().map_err(|_| "grid lock poisoned")?;
+        let reputation = grid.reputation();
+        let mut workers: Vec<(&String, &crate::reputation::Record)> =
+            reputation.workers().collect();
+        workers.sort_by(|a, b| a.0.cmp(b.0));
+
+        let rows: Vec<String> = workers
+            .iter()
+            .map(|(name, record)| {
+                let standing = match reputation.standing(name) {
+                    Standing::Trusted { permille } => {
+                        format!(r#"{{"kind":"trusted","permille":{permille}}}"#)
+                    }
+                    Standing::Unproven { needs } => {
+                        format!(r#"{{"kind":"unproven","canariesNeeded":{needs}}}"#)
+                    }
+                    Standing::ProvenWrong { failed, lied } => format!(
+                        r#"{{"kind":"provenWrong","failedCanaries":{failed},"provenLies":{lied}}}"#
+                    ),
+                };
+                format!(
+                    r#"{{"worker":"{}","accepted":{},"canariesPassed":{},"canariesFailed":{},"lies":{},"silences":{},"checkedEvery":{},"standing":{standing}}}"#,
+                    escape(name),
+                    record.accepted,
+                    record.passed,
+                    record.failed,
+                    record.lied,
+                    record.silent,
+                    reputation.canary_permille(name),
+                )
+            })
+            .collect();
+        format!("[{}]", rows.join(","))
     };
     respond(request, 200, "application/json", body.into_bytes())
 }

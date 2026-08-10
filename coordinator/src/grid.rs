@@ -25,16 +25,26 @@
 //!
 //! [ADR-0014]: ../../docs/adr/0014-the-coordinator-keeps-a-log-not-a-database.md
 //!
-//! **There is no reputation and there are no canaries.** ADR-0001's cost model assumes both —
-//! a canary rate `c` and a replication rate `r` — and only `r` exists here. Reputation is what
-//! decides *who* gets replicated, and inventing a scoring rule with no real workers to score
-//! would be fiction. The replication rate is a dial with a number in it; the rest is not.
+//! **There are canaries and a reputation now** ([ADR-0015]), and the warning this paragraph used
+//! to carry still applies to what they are allowed to be. ADR-0001 asks for "a per-worker
+//! posterior on returns correct results", so [`crate::reputation`] computes exactly that and
+//! invents nothing; the thresholds it needs are dials with stated defaults, like `--replicate`,
+//! rather than constants somebody believed in.
 //!
-//! **Nothing here is a penalty.** [`crate::dispute`] names who lied and who went quiet, and
-//! ADR-0001 says those two should cost a volunteer very differently. Acting on that needs the
-//! reputation store above, so for now a verdict is recorded and read, not applied.
+//! The rule that came out of building it: **a canary is only as true as the unit it was copied
+//! from.** A unit accepted after a single execution is one volunteer's word, and minting a canary
+//! from one promotes a cheat's answer to ground truth — after which honest volunteers are marked
+//! as cheats for being right. Sources must be corroborated, which means `c` and `r` are not the
+//! independent terms ADR-0001's cost model adds together.
+//!
+//! **Nothing here is a penalty, and that is still deliberate.** A volunteer proven wrong is
+//! checked harder and nothing else. [`crate::dispute`] names who lied and who went quiet, and
+//! ADR-0001 wants those to cost differently — they do, in the posterior — but *excluding* a
+//! volunteer is a decision with consequences for a real person and it needs an operator.
+//!
+//! [ADR-0015]: ../../docs/adr/0015-canaries-are-what-catch-a-cheat.md
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -42,8 +52,10 @@ use cairn_runtime::canon::{self, Config};
 use cairn_runtime::engine::image;
 use cairn_runtime::validate;
 
-use crate::dispute::{self, Dispute};
+use crate::dispute::{self, Conclusion, Dispute};
 use crate::journal::Entry;
+use crate::reputation::{Reputation, Standing};
+use cairn_runtime::dispute::Party;
 
 /// A work unit's identity: the BLAKE3 hash of the canonical module bytes.
 ///
@@ -111,6 +123,21 @@ pub struct Unit {
     leases: Vec<(String, Instant)>,
     /// Where this unit has got to.
     pub outcome: Outcome,
+    /// Set when this unit is a check rather than science. See [`Grid::mint_canary`].
+    pub canary: Option<Canary>,
+}
+
+/// A unit the coordinator already knows the answer to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Canary {
+    /// What the source unit was accepted as. A different answer is a wrong answer, established
+    /// without a second volunteer and without a dispute.
+    pub expected: Vec<u8>,
+    /// The decided unit this was copied from.
+    ///
+    /// Kept so that a worker is never handed a canary derived from a unit it answered itself,
+    /// which would be asking somebody to confirm their own work.
+    pub source: usize,
 }
 
 /// One volunteer's answer.
@@ -209,6 +236,18 @@ pub struct Grid {
     replication_percent: u32,
     lease: Duration,
     patience: Duration,
+    reputation: Reputation,
+    /// Leases handed out since this coordinator started. Only ever used to vary the canary roll.
+    leases_handed_out: u64,
+    /// Disputes already folded into [`Self::reputation`], so nobody is charged twice.
+    accounted: HashSet<usize>,
+    /// Makes the canary schedule unpredictable to a worker that counts its own leases.
+    ///
+    /// Per-process and never written down. Recovering it across a restart would let a worker
+    /// that had once learned it keep the advantage forever, and losing it costs nothing: what
+    /// must be durable is *which* canaries were issued and how they came out, not the coin that
+    /// chose them.
+    canary_secret: [u8; 32],
 }
 
 impl Default for Grid {
@@ -228,7 +267,18 @@ impl Grid {
             replication_percent: DEFAULT_REPLICATION_PERCENT,
             lease: DEFAULT_LEASE,
             patience: dispute::DEFAULT_PATIENCE,
+            reputation: Reputation::default(),
+            accounted: HashSet::new(),
+            leases_handed_out: 0,
+            canary_secret: fresh_secret(),
         }
+    }
+
+    /// Judge volunteers under a chosen policy. See [`crate::reputation::Policy`].
+    #[must_use]
+    pub fn with_reputation(mut self, reputation: Reputation) -> Self {
+        self.reputation = reputation;
+        self
     }
 
     /// Replicate this percentage of units to a second volunteer. `0` disables spot checks.
@@ -330,6 +380,7 @@ impl Grid {
             quorum: if replicated { 2 } else { DEFAULT_QUORUM },
             leases: Vec::new(),
             outcome: Outcome::Open,
+            canary: None,
         });
         Ok(self.units.len() - 1)
     }
@@ -397,6 +448,10 @@ impl Grid {
                         quorum: *quorum,
                         leases: Vec::new(),
                         outcome: Outcome::Open,
+                        // A canary is minted at lease time and is not queued work, so nothing in
+                        // the journal reconstructs one. What survives a restart is its *outcome*
+                        // — see `Entry::Canary`.
+                        canary: None,
                     });
                     restored.units += 1;
                 }
@@ -466,6 +521,15 @@ impl Grid {
                     restored.decided += 1;
                 }
 
+                Entry::Canary { worker, passed } => {
+                    if *passed {
+                        self.reputation.passed_a_canary(worker);
+                    } else {
+                        self.reputation.failed_a_canary(worker);
+                    }
+                    restored.canaries += 1;
+                }
+
                 Entry::Disputed { unit, parties } => {
                     let held = self
                         .units
@@ -484,6 +548,233 @@ impl Grid {
         }
 
         Ok(restored)
+    }
+
+    /// What the coordinator has observed about its volunteers.
+    #[must_use]
+    pub const fn reputation(&self) -> &Reputation {
+        &self.reputation
+    }
+
+    /// Mint a canary for `worker` if it is due one and there is a decided unit to copy.
+    ///
+    /// # What makes a canary work, and what breaks it
+    ///
+    /// A canary is a unit whose answer the coordinator already knows, handed out as if it were
+    /// new work. It is the only mechanism in Cairn that catches a wrong answer **by itself** —
+    /// everything else waits for a second volunteer to disagree, which happens on the fraction
+    /// of units that are replicated and never on the rest.
+    ///
+    /// ADR-0001 states the condition it depends on: canaries must be "drawn from the same
+    /// workload and the same input distribution as live units, and must not be reused across
+    /// workers". Both are structural here rather than aspirational:
+    ///
+    /// - **Same distribution**, because a canary *is* a live unit — a decided one, queued again
+    ///   with the same workload and the same input. There is no separate canary corpus that
+    ///   could drift away from the real one.
+    /// - **A fresh index**, because `/api/status` is public and says which units are decided. A
+    ///   canary that reused its source's index would announce itself to anybody who looked.
+    /// - **Not reused**, because each minted canary is dispatched once, to one worker, and
+    ///   `source` records where it came from so the same worker is never given a unit whose
+    ///   answer it has already produced.
+    ///
+    /// **The limit worth stating: the schedule is unpredictable, the content is not.** Two
+    /// colluding workers who share inputs and answers defeat this, because one of them has seen
+    /// the source unit. ADR-0001 scopes collusion out; this does not fix it.
+    ///
+    /// # A canary is only as true as the unit it was copied from
+    ///
+    /// This was found by a test that failed, and it is the sharpest thing in the file. A unit
+    /// accepted after a **single** execution — which is almost every unit, and the entire point
+    /// of the project — carries one volunteer's word for its answer. Minting a canary from one
+    /// of those takes a cheat's wrong answer and promotes it to *the answer the coordinator
+    /// knows*, so the next volunteer to be handed that canary is marked as a cheat for being
+    /// right. The mechanism would not merely fail to catch cheats; it would launder them into
+    /// convicting honest people.
+    ///
+    /// So a source must be **corroborated**: either two volunteers answered it and agreed, or
+    /// every volunteer who answered it was already trusted. See [`Grid::is_corroborated`].
+    ///
+    /// That has a consequence for ADR-0001's cost model, which adds `c` and `r` as independent
+    /// terms: **they are not independent.** Corroboration comes from replication, and trust
+    /// comes from canaries, so `r = 0` means no corroborated units, which means no canaries,
+    /// which means no worker ever becomes trusted. Replication is what canaries are grounded
+    /// in, and a grid that turns it off has turned them off too.
+    fn mint_canary(&mut self, worker: &str, now: Instant) -> Option<Assignment> {
+        let due = self.reputation.canary_permille(worker);
+        if due == 0 {
+            return None;
+        }
+
+        // Unpredictable to the worker, deterministic to the coordinator. A counter — the idiom
+        // `--replicate` uses — would let a worker that counts its own leases know exactly which
+        // unit is the checked one, and answer that one honestly. Hashing a per-run secret with
+        // the worker's name and its lease number costs one BLAKE3 of 40-odd bytes and removes
+        // that. It is not a cryptographic guarantee against an adversary who can read the
+        // coordinator's memory, and it is not meant to be.
+        let sequence = self.leases_handed_out;
+        let mut probe = Vec::with_capacity(48);
+        probe.extend_from_slice(&self.canary_secret);
+        probe.extend_from_slice(worker.as_bytes());
+        probe.extend_from_slice(&sequence.to_le_bytes());
+        let rolled = blake3::hash(&probe);
+        let bytes = rolled.as_bytes();
+        let roll = u32::from_le_bytes(<[u8; 4]>::try_from(bytes.get(..4)?).ok()?) % 1000;
+        if roll >= due {
+            return None;
+        }
+
+        // Corroborated units this worker has not answered. The corroboration is the important
+        // half and the reason is in this function's documentation: a canary minted from one
+        // volunteer's unconfirmed word promotes that word to ground truth.
+        let eligible: Vec<usize> = self
+            .units
+            .iter()
+            .enumerate()
+            .filter(|(_, unit)| {
+                self.is_corroborated(unit) && !unit.results.iter().any(|r| r.worker == worker)
+            })
+            .map(|(index, _)| index)
+            .collect();
+        if eligible.is_empty() {
+            return None;
+        }
+        // Chosen from the same hash, and varied on purpose. Always copying the newest decided
+        // unit would hand every worker the same input, and ADR-0001 requires that canaries "not
+        // be reused across workers" — two volunteers comparing notes would find one immediately.
+        let pick = u32::from_le_bytes(<[u8; 4]>::try_from(bytes.get(4..8)?).ok()?) as usize;
+        let index = *eligible.get(pick % eligible.len())?;
+        let unit = self.units.get(index)?;
+        let Outcome::Accepted { ref output } = unit.outcome else {
+            return None;
+        };
+
+        let canary = Unit {
+            workload: unit.workload.clone(),
+            input: unit.input.clone(),
+            results: Vec::new(),
+            // One answer settles a canary: the coordinator is the second opinion, and it already
+            // has it. Replicating a unit whose answer is known would spend a volunteer to learn
+            // nothing.
+            quorum: 1,
+            leases: vec![(worker.to_owned(), now + self.lease)],
+            outcome: Outcome::Open,
+            canary: Some(Canary {
+                expected: output.clone(),
+                source: index,
+            }),
+        };
+        let workload = canary.workload.clone();
+        let input = canary.input.clone();
+        self.units.push(canary);
+
+        Some(Assignment {
+            unit: self.units.len() - 1,
+            workload,
+            input,
+        })
+    }
+
+    /// Whether this unit's answer is good enough to check somebody else against.
+    ///
+    /// Two ways to be sure of an answer, and single-execution acceptance is neither of them:
+    ///
+    /// - **Two volunteers answered and agreed.** That is what `--replicate` buys, and it is the
+    ///   only source of ground truth a brand-new grid has.
+    /// - **Every volunteer who answered it was already trusted**, which means each of them had
+    ///   passed canaries drawn from units corroborated the first way. The chain is grounded.
+    ///
+    /// Canaries are excluded as sources, so one known answer cannot be copied across the grid
+    /// in place of sampling it.
+    fn is_corroborated(&self, unit: &Unit) -> bool {
+        if unit.canary.is_some() || !matches!(unit.outcome, Outcome::Accepted { .. }) {
+            return false;
+        }
+        unit.results.len() >= 2
+            || unit.results.iter().all(|r| {
+                matches!(
+                    self.reputation.standing(&r.worker),
+                    Standing::Trusted { .. }
+                )
+            })
+    }
+
+    /// Fold any newly-finished disputes into the volunteers' records.
+    ///
+    /// # Why this is swept rather than pushed
+    ///
+    /// A dispute concludes on its own thread, some seconds after the request that started it
+    /// returned, and it has nowhere to push the news: `dispute.rs` knows about arguments and
+    /// deliberately not about reputation. So the grid sweeps. It is cheap — a walk of a list
+    /// that is short by design, skipping everything already accounted for — and it happens on
+    /// the busiest path there is, so a verdict is never long unnoticed.
+    ///
+    /// A dispute is accounted for **once**. `accounted` is what makes that true, and without it
+    /// a worker would be charged for the same lost argument on every lease anybody made.
+    fn account_for_finished_disputes(&mut self) {
+        for index in 0..self.disputes.len() {
+            if self.accounted.contains(&index) {
+                continue;
+            }
+            let Some(dispute) = self.disputes.get(index) else {
+                continue;
+            };
+            let log = dispute.log();
+            let Some(conclusion) = log.conclusion.as_ref() else {
+                continue;
+            };
+
+            let party = |which: Party| -> Option<String> {
+                dispute
+                    .parties
+                    .get(match which {
+                        Party::First => 0,
+                        Party::Second => 1,
+                    })
+                    .cloned()
+            };
+
+            let charge: Vec<(String, bool)> = match conclusion {
+                // Proven, by executing the instruction they disagreed about. The heaviest thing
+                // this project can establish about a volunteer.
+                Conclusion::Convicted { liar, .. } => party(*liar)
+                    .map(|who| vec![(who, true)])
+                    .unwrap_or_default(),
+                // Went quiet. ADR-0001 insists this cost materially less than a proven lie, and
+                // `Policy::weight_of_silence` is where that lives.
+                Conclusion::Abandoned { by, .. } => {
+                    party(*by).map(|who| vec![(who, false)]).unwrap_or_default()
+                }
+                // Two parties lied about the same instruction and disagreed about how. Not
+                // reachable by accident.
+                Conclusion::BothWrong { .. } => dispute
+                    .parties
+                    .iter()
+                    .map(|who| (who.clone(), true))
+                    .collect(),
+                // Nobody lied — both replays agreed, and the trace they agreed on named whose
+                // *reported answer* was wrong. A wrong answer honestly replayed is a broken
+                // engine, not a liar, so it is charged as a failed check rather than a lie.
+                Conclusion::AgreedOnTrace { wrong, .. } => wrong
+                    .and_then(party)
+                    .map(|who| vec![(who, false)])
+                    .unwrap_or_default(),
+                // The interactive protocol could not decide it, so nothing is proven about
+                // anybody. Charging a party here would be charging them for the protocol
+                // failing, which is the coordinator's problem and not theirs.
+                Conclusion::FellBack { .. } => Vec::new(),
+            };
+
+            drop(log);
+            for (who, proven_lie) in charge {
+                if proven_lie {
+                    self.reputation.lied(&who);
+                } else {
+                    self.reputation.went_silent(&who);
+                }
+            }
+            self.accounted.insert(index);
+        }
     }
 
     /// A registered workload by id.
@@ -535,6 +826,17 @@ impl Grid {
     /// important line in this function: it is what makes a quorum mean two *independent*
     /// executions rather than the same execution counted twice.
     pub fn lease(&mut self, worker: &str, now: Instant) -> Option<Assignment> {
+        self.leases_handed_out = self.leases_handed_out.saturating_add(1);
+        // Verdicts arrive on their own threads with nowhere to push the news, so the busiest
+        // path collects them. See `account_for_finished_disputes`.
+        self.account_for_finished_disputes();
+        // Checked before real work, so that a canary is not merely one of the units a worker
+        // gets but is drawn from the same stream at the same moment. Nothing about the reply
+        // distinguishes it.
+        if let Some(canary) = self.mint_canary(worker, now) {
+            return Some(canary);
+        }
+
         for (index, unit) in self.units.iter_mut().enumerate() {
             if unit.outcome != Outcome::Open {
                 continue;
@@ -596,6 +898,27 @@ impl Grid {
             }
 
             unit.leases.retain(|(w, _)| *w != submission.worker);
+
+            // A canary settles here and goes no further. There is nothing to replicate — the
+            // coordinator is the second opinion and already has it — and nothing to dispute,
+            // because a dispute establishes *which of two claims is true* and this answer is
+            // not in doubt. What comes back is evidence about the worker, not about the science.
+            if let Some(canary) = unit.canary.clone() {
+                let right = submission.output == canary.expected;
+                let worker = submission.worker.clone();
+                unit.results.push(submission);
+                unit.outcome = Outcome::Accepted {
+                    output: canary.expected,
+                };
+                let outcome = unit.outcome.clone();
+                if right {
+                    self.reputation.passed_a_canary(&worker);
+                } else {
+                    self.reputation.failed_a_canary(&worker);
+                }
+                return Ok(outcome);
+            }
+
             unit.results.push(submission);
 
             if unit.results.len() < unit.quorum {
@@ -633,6 +956,16 @@ impl Grid {
 
         let unit = self.units.get_mut(index).ok_or(Refusal::UnknownUnit)?;
         unit.outcome = outcome.clone();
+
+        // Work done, credited to everybody who did it. Deliberately not trust earned: almost
+        // every unit is accepted after a single execution, so this counts contribution and says
+        // nothing about honesty. Only a canary does that.
+        if matches!(outcome, Outcome::Accepted { .. }) {
+            let workers: Vec<String> = unit.results.iter().map(|r| r.worker.clone()).collect();
+            for worker in workers {
+                self.reputation.accepted(&worker);
+            }
+        }
         Ok(outcome)
     }
 
@@ -686,6 +1019,21 @@ impl Grid {
     }
 }
 
+/// A per-process value a worker cannot guess, for choosing which units are canaries.
+///
+/// Not `rand`: a dependency has to do something the standard library cannot, and this needs
+/// unpredictability to a volunteer rather than cryptographic randomness. The process id and the
+/// clock, hashed, are unpredictable to somebody on the other end of an HTTP connection — and if
+/// they are not, the attacker is already inside the machine that decides who cheated.
+fn fresh_secret() -> [u8; 32] {
+    let mut seed = Vec::with_capacity(24);
+    seed.extend_from_slice(&std::process::id().to_le_bytes());
+    if let Ok(since) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        seed.extend_from_slice(&since.as_nanos().to_le_bytes());
+    }
+    *blake3::hash(&seed).as_bytes()
+}
+
 /// What came back from a journal, for the line a restarted coordinator prints.
 ///
 /// Counts rather than a log: the interesting number is how much was *not* lost, and the one
@@ -703,6 +1051,8 @@ pub struct Restored {
     pub decided: usize,
     /// Leases put back as evidence, so a volunteer that was mid-unit is still recognised.
     pub leases: usize,
+    /// Canary outcomes put back, so volunteers keep the standing they earned.
+    pub canaries: usize,
     /// Units that were mid-argument, and who was arguing. Each is back to `Open`.
     pub voided: Vec<(usize, [String; 2])>,
 }

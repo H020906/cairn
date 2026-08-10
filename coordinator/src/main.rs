@@ -43,13 +43,14 @@ use std::sync::{Arc, Mutex};
 use cairn_coordinator::api;
 use cairn_coordinator::grid::{self, Grid};
 use cairn_coordinator::journal::{Entry, Journal};
+use cairn_coordinator::reputation;
 
 const USAGE: &str = "\
 cairn-coordinator — dispatch work units to volunteers and settle the disagreements
 
 USAGE
     cairn-coordinator <workload> [input-file ...] [--bind ADDR] [--replicate PERCENT]
-                      [--journal FILE]
+                      [--journal FILE] [--canary PERMILLE]
 
     <workload>     a .wasm binary or .wat text module, validated and instrumented on startup
     [input-file]   one unit per input file; with none, a single unit with empty input
@@ -58,6 +59,14 @@ USAGE
                    (default 10; 0 disables). ADR-0001 calls this `r`.
     --journal      append every decision to FILE, and replay it on startup. Without it the
                    grid is in memory only and dies with the process.
+    --canary       how often a TRUSTED volunteer is handed a unit whose answer is already
+                   known, in permille (default 30; ADR-0001 calls this `c`). Volunteers that
+                   have not yet earned trust are checked far harder, and that rate is not a
+                   flag. `--canary 0` turns checking off for trusted workers entirely.
+
+                   Canaries need corroborated units to copy, and corroboration comes from
+                   --replicate. With --replicate 0 there are none, so there are no canaries
+                   and nobody ever becomes trusted. See docs/adr/0015.
 
 WHAT IT DOES
     Registers the workload, queues a unit per input, and serves an HTTP API that volunteers
@@ -98,6 +107,7 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut bind = "127.0.0.1:8080".to_owned();
     let mut replicate = grid::DEFAULT_REPLICATION_PERCENT;
     let mut journal_path: Option<String> = None;
+    let mut policy = reputation::Policy::default();
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
@@ -105,6 +115,16 @@ fn run(args: &[String]) -> Result<(), String> {
             "--bind" => bind = rest.next().ok_or("--bind needs an address")?.clone(),
             "--journal" => {
                 journal_path = Some(rest.next().ok_or("--journal needs a path")?.clone());
+            }
+            "--canary" => {
+                policy.canaries_when_trusted = rest
+                    .next()
+                    .ok_or("--canary needs a rate in permille")?
+                    .parse()
+                    .map_err(|_| "--canary needs a number of permille")?;
+                if policy.canaries_when_trusted > 1000 {
+                    return Err("--canary is permille; 1000 is every unit".to_owned());
+                }
             }
             "--replicate" => {
                 replicate = rest
@@ -124,7 +144,9 @@ fn run(args: &[String]) -> Result<(), String> {
     let source =
         std::fs::read(workload_path).map_err(|e| format!("could not read {workload_path}: {e}"))?;
 
-    let mut grid = Grid::new().with_replication(replicate);
+    let mut grid = Grid::new()
+        .with_replication(replicate)
+        .with_reputation(reputation::Reputation::new(policy));
 
     // Open the journal before touching the grid, so that a file this build cannot read stops the
     // coordinator rather than being silently replaced by a fresh grid over the top of it.
@@ -145,6 +167,12 @@ fn run(args: &[String]) -> Result<(), String> {
                     "recovered     {} workloads, {} units, {} results, {} already decided",
                     restored.workloads, restored.units, restored.results, restored.decided
                 );
+                if restored.canaries > 0 {
+                    println!(
+                        "              {} canary outcomes, so volunteers keep the standing they earned",
+                        restored.canaries
+                    );
+                }
                 // Named individually rather than counted, because somebody was in the middle of
                 // each of these and the operator should be able to see who.
                 for (unit, parties) in &restored.voided {
@@ -208,6 +236,15 @@ fn run(args: &[String]) -> Result<(), String> {
     println!(
         "replication   {replicate}% (ADR-0001's `r`; a replicated unit goes to two volunteers)"
     );
+    println!(
+        "canaries      {}‰ once a volunteer is trusted, {}‰ until then (ADR-0001's `c`)",
+        policy.canaries_when_trusted, policy.canaries_when_not
+    );
+    if replicate == 0 {
+        println!(
+            "              NONE will be minted: a canary copies a unit two volunteers agreed              on, and --replicate 0 produces none. See docs/adr/0015."
+        );
+    }
     println!();
 
     // Serve the browser worker if it is where it should be, so one command is the whole system.

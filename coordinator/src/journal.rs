@@ -158,6 +158,18 @@ pub enum Entry {
         /// The answer it decided on, if it reached one.
         output: Option<Vec<u8>>,
     },
+    /// A canary came back, and whether it was right.
+    ///
+    /// The canary unit itself is deliberately not recorded. It is a check rather than science,
+    /// minted at lease time and worth nothing once answered — what has to survive a restart is
+    /// what it *established about the worker*, because losing that would put every volunteer
+    /// back on the stranger's sampling rate and make them all earn their standing again.
+    Canary {
+        /// Who was checked.
+        worker: String,
+        /// Whether they gave the answer the coordinator already had.
+        passed: bool,
+    },
     /// A disagreement went to an interactive dispute.
     ///
     /// Recorded so that a restart can *void* it and say whose argument it dropped. It is
@@ -364,6 +376,7 @@ const TAG_ACCEPTED: u8 = 4;
 const TAG_SETTLED: u8 = 5;
 const TAG_DISPUTED: u8 = 6;
 const TAG_LEASED: u8 = 7;
+const TAG_CANARY: u8 = 8;
 
 fn put_bytes(out: &mut Vec<u8>, bytes: &[u8]) {
     out.extend_from_slice(&u32::try_from(bytes.len()).unwrap_or(u32::MAX).to_le_bytes());
@@ -422,6 +435,11 @@ fn encode(entry: &Entry) -> Vec<u8> {
             put_bytes(&mut out, verdict.as_bytes());
             out.push(u8::from(output.is_some()));
             put_bytes(&mut out, output.as_deref().unwrap_or_default());
+        }
+        Entry::Canary { worker, passed } => {
+            out.push(TAG_CANARY);
+            put_bytes(&mut out, worker.as_bytes());
+            out.push(u8::from(*passed));
         }
         Entry::Leased { unit, worker } => {
             out.push(TAG_LEASED);
@@ -520,6 +538,10 @@ fn decode(payload: &[u8], index: usize) -> Result<Entry, Error> {
                 output: has_output.then_some(output),
             }
         }
+        TAG_CANARY => Entry::Canary {
+            worker: reader.text().ok_or_else(corrupt)?,
+            passed: reader.byte().ok_or_else(corrupt)? != 0,
+        },
         TAG_LEASED => Entry::Leased {
             unit: reader.usize().ok_or_else(corrupt)?,
             worker: reader.text().ok_or_else(corrupt)?,
@@ -594,6 +616,14 @@ mod tests {
             Entry::Leased {
                 unit: 11,
                 worker: "carol".to_owned(),
+            },
+            Entry::Canary {
+                worker: "carol".to_owned(),
+                passed: true,
+            },
+            Entry::Canary {
+                worker: "mallory".to_owned(),
+                passed: false,
             },
             Entry::Disputed {
                 unit: 10,

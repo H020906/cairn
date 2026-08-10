@@ -364,7 +364,7 @@ small unit is not a measurement. **What this page demonstrates is agreement, not
 ## Checking the claims instead of believing them
 
 ```bash
-cargo test --workspace        # 295 tests
+cargo test --workspace        # 319 tests
 cargo bench                   # regenerates docs/benchmarks.md
 ```
 

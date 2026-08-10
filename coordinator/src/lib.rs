@@ -14,3 +14,4 @@ pub mod api;
 pub mod dispute;
 pub mod grid;
 pub mod journal;
+pub mod reputation;

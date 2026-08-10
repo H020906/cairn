@@ -312,7 +312,7 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-310 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+319 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
 checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
 randomly generated float expressions and 200 whole generated modules per run, a bisection game
 that converges on a corrupted instruction, and an adjudication that names the liar without
@@ -325,15 +325,15 @@ Cairn is being built in a deliberately short, fixed window, with a bias toward *
 finished* over *broad and abandoned*.
 
 **What exists is the verification kernel, two workers, a coordinator that ties them into a
-system, the interactive dispute protocol running over it, and a journal that survives killing
-it.** What is not here: reputation, canaries, penalties, a dashboard, and a real scientific
-workload. That is stated
+system, the interactive dispute protocol running over it, a journal that survives killing it, and
+canaries that catch a cheat without waiting for one.** What is not here: penalties, a dashboard,
+and a real scientific workload. That is stated
 plainly rather than left implied by unticked boxes.
 
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~17.2k lines of Rust source, 310 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~18.0k lines of Rust source, 319 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
@@ -344,7 +344,8 @@ plainly rather than left implied by unticked boxes.
 | **The browser's engine in the determinism gate** | **Done** — 1,046 units through the volunteer's own host on V8. It caught a real NaN-sign divergence the moment its teeth were checked |
 | **Coordinator: persistence** | **Done** — an append-only journal, not a database. Killed outright mid-run and restarted: 60 units, 60 executed, nothing lost and nothing repeated |
 | Coordinator: heartbeats, log compaction | Not started — the journal only grows |
-| Verification policy: canaries, reputation, penalties | Not started — the replication rate exists and verdicts name who lied; nothing acts on it |
+| **Verification policy: canaries + reputation** | **Done** — the first mechanism that catches a cheat without a second volunteer. Measured: a cheat is caught in 3–21 units at ordinary rates, and one cheating 1% of the time usually is not |
+| Penalties | Not started, deliberately — a caught volunteer is checked harder and nothing else. Excluding somebody needs an operator, not a constant |
 | Dashboard + live globe | Not started |
 | A real scientific workload (molecular docking) | Not started |
 

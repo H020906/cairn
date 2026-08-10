@@ -25,6 +25,7 @@ done this way?"*
 | [0012](0012-the-answer-is-part-of-the-committed-state.md) | The answer is part of the committed state | Accepted, completes 0011 |
 | [0013](0013-a-volunteer-computes-its-own-parallelism.md) | A volunteer computes its own parallelism, and reports under one name | Accepted |
 | [0014](0014-the-coordinator-keeps-a-log-not-a-database.md) | The coordinator keeps a log, not a database | Accepted, amends 0002 |
+| [0015](0015-canaries-are-what-catch-a-cheat.md) | Canaries are what catch a cheat, and they are grounded in replication | Accepted, completes 0001 |
 
 ## Reading order
 
@@ -89,6 +90,15 @@ log in the standard library instead. Read it for two things beyond the storage a
 restart does to an argument somebody was in the middle of, and the finding that a lease is
 **evidence** and a **reservation** at the same time — restoring only the first is what stops a
 volunteer being punished for the coordinator crashing under it.
+
+**0015** closes ADR-0001's last missing term. Read it for the measurement, which is the least
+flattering number in the repository: **sampling bounds the damage a cheat does and not the time it
+takes** — a volunteer corrupting one unit in a hundred is usually still undetected after nine
+hundred units. It also corrects ADR-0001's cost model, which adds `c` and `r` as independent
+terms: canaries must be copied from *corroborated* units, corroboration comes from replication, so
+`r = 0` silently turns canaries off. That was found by a test which showed the naive version
+laundering a cheat's answer into ground truth and then convicting honest volunteers for being
+right.
 
 ## Format
 

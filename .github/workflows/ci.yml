@@ -102,6 +102,17 @@ jobs:
             workloads/examples/rust/target/wasm32-unknown-unknown/release/cairn_workload_example.wasm \
             workloads/examples/input-a.bin
 
+      - name: How long a cheat lasts, measured rather than assumed
+        # ADR-0001 rests on a canary rate `c` and never said how fast sampling catches anybody.
+        # This runs volunteers that cheat at known rates against the real Grid and prints the
+        # table. Released because it is tens of thousands of leases per row.
+        #
+        # It also guards the finding that produced the mechanism's one hard rule: a canary must
+        # be copied from a CORROBORATED unit. Minting one from a single-execution acceptance
+        # promotes a cheat's answer to ground truth, and then marks honest volunteers as cheats
+        # for being right.
+        run: cargo test -p cairn-coordinator --release --test canaries -- --nocapture
+
       - name: Killing the coordinator does not lose the work people did for it
         # `--journal` is an append-only log rather than a database (docs/adr/0014), so its
         # recovery rules are code in this repository and not somebody else's. The two that
