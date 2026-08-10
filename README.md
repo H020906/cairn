@@ -269,6 +269,28 @@ unit itself — a route, not a gap, because challenging a volunteer that cannot 
 it for silence. See
 [ADR-0011](docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
 
+### What one donated machine is worth
+
+A volunteer uses every core it can spare. It works out how many rather than asking — `--jobs` can
+only *lower* it — because the dangerous answer to "how many at once?" is an easy one to type: a
+workload may declare 256 MiB, so `--jobs 32` on a 32-thread laptop asks for 8 GiB of a machine
+somebody is still using. Concurrency is bounded by a pool of *bytes* rather than a count of
+threads, so a grid mixing small and large workloads needs no re-planning, and a quarter of the
+budget is held back for the thing that actually costs memory: **arguing** about a unit, which
+holds up to 32 clones of the machine.
+
+On the laptop this was written on — an i5-13500H, 4 performance cores + 8 efficiency cores, 16
+hardware threads — 400 units of `workloads/examples/busy-loop.wat` take **56.0 s on one thread
+and 7.7 s on fifteen**: 7.2×, not 15×. **The curve bends at four, which is the number of
+performance cores** — 93% efficiency up to there, and about a third of that per thread after.
+
+The volunteer prints each unit's own execution time, which says where the rest went: a unit takes
+136 ms alone and 272 ms with fifteen running, so every thread is doing 49% of its solo work. The
+machine's own ceiling is therefore about 7.4× and Cairn is getting 96% of it. **Donated
+throughput follows physical silicon and thermal headroom, not the core count the operating system
+reports** — on a hybrid laptop those differ by nearly a factor of two. See
+[ADR-0013](docs/adr/0013-a-volunteer-computes-its-own-parallelism.md).
+
 ### Or just the browser worker, with no coordinator
 
 ```bash
@@ -289,7 +311,7 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-280 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+294 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
 checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
 randomly generated float expressions and 200 whole generated modules per run, a bisection game
 that converges on a corrupted instruction, and an adjudication that names the liar without
@@ -309,13 +331,14 @@ plainly rather than left implied by unticked boxes.
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~14.9k lines of Rust source, 280 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~16.1k lines of Rust source, 294 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
 | **Browser volunteer** | **Done** — a Web Worker around the page's own engine; no install, no dependencies, no build step |
 | **Coordinator: registration, queue, leases, quorum, referee** | **Done** — Rust, in memory, no database; the system runs end to end |
 | **The interactive dispute protocol, over the network** | **Done** — 1,050,030 instructions settled in 20 rounds and **one** executed instruction |
+| **A volunteer that uses the whole machine** | **Done** — parallelism computed from memory rather than configured; 7.2× on a 16-thread laptop, which is 96% of what the machine can give |
 | Coordinator: persistence, heartbeats | Not started |
 | Verification policy: canaries, reputation, penalties | Not started — the replication rate exists and verdicts name who lied; nothing acts on it |
 | Dashboard + live globe | Not started |

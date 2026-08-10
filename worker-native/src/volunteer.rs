@@ -21,8 +21,28 @@
 //! POST /api/result?unit=N&worker=NAME&fuel=F&bisects=1
 //! ```
 //!
-//! Challenges are polled **before** work, because a party to a running dispute is holding one up
-//! and a unit can wait. No state is kept across polls beyond a module cache and a name.
+//! No state is kept across polls beyond a module cache and a name.
+//!
+//! # The shape: many workers, one arguer, one name
+//!
+//! A donated machine has more than one core, and units share nothing — each gets its own
+//! instance and its own linear memory, and runs single-threaded — so several run side by side.
+//! [`capacity`] decides how many, and does so from memory rather than from cores.
+//!
+//! Two things about that shape are load-bearing, and neither is obvious:
+//!
+//! **All of those threads report under one worker name.** A sixteen-core machine that registered
+//! as sixteen volunteers could satisfy both halves of a replicated unit *by itself*, and the
+//! quorum would be two executions on one machine by one operator — which is not replication at
+//! all, it is a machine agreeing with itself. The coordinator enforces one vote per name
+//! (`Grid::lease` skips units this worker has already answered), so sharing the name is what
+//! keeps that guarantee true. One machine, one name, one vote.
+//!
+//! **Arguing stays on a single thread.** Not for simplicity: a party to a dispute holds up to
+//! `DEFAULT_CHECKPOINT_BUDGET` clones of the machine, which is tens of times what executing the
+//! same unit costs, and it is the *unbudgeted* memory in a volunteer. The referee asks one party
+//! one question at a time anyway, so there is nothing to gain by spreading it out and a machine
+//! to lose.
 //!
 //! # The one rule that is easy to get wrong
 //!
@@ -31,15 +51,23 @@
 //! idleness and goes home has *abandoned* a dispute, which means losing by default: convicted
 //! because the other party was slow. `/api/challenge` therefore answers with three states, and
 //! [`Turn`] is the client half of that.
+//!
+//! This is why the arguing thread outlives the working ones. When the last unit thread gives up
+//! on an empty queue, the arguer keeps polling for `--idle-exit` more rounds and any question at
+//! all resets the count. Leaving is the *last* thing a volunteer does.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use cairn_runtime::dispute::{self, Answer, Claimant as _, Question, Replay, Step};
 use cairn_runtime::engine::image::{self, Image};
 use cairn_runtime::engine::machine::Limits;
+use cairn_runtime::validate;
 
+use crate::capacity::{self, Allowance, Survey};
 use crate::client;
 use crate::host;
 
@@ -56,12 +84,32 @@ const IDLE: Duration = Duration::from_millis(500);
 /// unit, and it dominates the wall-clock cost of a dispute far more than the replays do.
 const TAKING_TURNS: Duration = Duration::from_millis(60);
 
+/// How far apart to start the unit threads.
+///
+/// The coordinator serves requests one at a time. Threads that start together stay together —
+/// they lease together, finish together, and poll together — which turns a steady trickle of
+/// requests into a burst every few hundred milliseconds. One sleep at startup is enough to break
+/// the convoy.
+///
+/// It is not free, and the cost is measurable: the ramp is `jobs × this`, and every thread that
+/// has not started yet is a core standing idle. At 25 ms and fifteen jobs it cost about 5% of a
+/// seven-second run, which is why it is 10.
+const STAGGER: Duration = Duration::from_millis(10);
+
 /// A volunteer's settings.
 pub struct Volunteer<'a> {
     /// Coordinator origin, e.g. `http://127.0.0.1:8080`.
     pub base: &'a str,
-    /// This volunteer's name. One name, one vote.
+    /// This volunteer's name. **One name, one vote** — every thread reports under it.
     pub name: &'a str,
+    /// An upper bound on units run at once, if the operator wants to donate less than the
+    /// machine could give. It can only lower the number [`capacity::threads`] arrives at.
+    pub jobs: Option<usize>,
+    /// The machine's spare memory in bytes, if the operator stated it.
+    ///
+    /// Only Linux can be asked this without `unsafe`, so everywhere else the alternative is a
+    /// conservative assumption printed as an assumption. See [`capacity::survey`].
+    pub memory: Option<u64>,
     /// Corrupt everything from this step onwards, to demonstrate what happens then.
     ///
     /// **A liar has to lie twice.** The wrong answer is what starts a dispute; lying in the
@@ -92,7 +140,7 @@ impl Volunteer<'_> {
     }
 }
 
-/// Poll a coordinator, do its work, and answer for it afterwards.
+/// Poll a coordinator, do its work on every core this machine can spare, and answer for it.
 ///
 /// # Errors
 ///
@@ -100,8 +148,49 @@ impl Volunteer<'_> {
 /// reported and skipped: a volunteer that exits because one request failed is a volunteer that
 /// leaves the network over a dropped packet.
 pub fn serve(settings: &Volunteer<'_>) -> Result<(), String> {
+    let survey = capacity::survey(settings.memory);
+    let jobs = capacity::threads(&survey, settings.jobs);
+    // Half the budget for units in flight. The rest is the machine's, and a dispute borrows a
+    // quarter of it — see `capacity`'s module docs for why arguing is the expensive part.
+    let shared = Shared {
+        allowance: Allowance::new(survey.memory.bytes() / 2),
+        modules: Mutex::new(HashMap::new()),
+        working: AtomicUsize::new(jobs),
+        survey,
+    };
+
+    announce(settings, &shared, jobs);
+    let shared = &shared;
+
+    thread::scope(|scope| {
+        for job in 0..jobs {
+            scope.spawn(move || {
+                thread::sleep(STAGGER * u32::try_from(job).unwrap_or(u32::MAX));
+                work(settings, shared, job);
+            });
+        }
+        // The arguing thread is this one, and it is the last to leave.
+        argue(settings, shared)
+    })
+}
+
+fn announce(settings: &Volunteer<'_>, shared: &Shared, jobs: usize) {
     println!("volunteer     {}", settings.name);
     println!("coordinator   {}", settings.base);
+    println!(
+        "cores         {} hardware threads, {jobs} donated",
+        shared.survey.cores
+    );
+    println!(
+        "memory        {} {}",
+        human(shared.survey.memory.bytes()),
+        shared.survey.memory.provenance()
+    );
+    println!(
+        "              {} for units in flight; a dispute may draw {} more",
+        human(shared.allowance.total()),
+        human(shared.survey.memory.bytes() / 4)
+    );
     println!(
         "can argue     yes — replays under Cairn's interpreter, so it can be a party to a dispute"
     );
@@ -114,14 +203,64 @@ pub fn serve(settings: &Volunteer<'_>) -> Result<(), String> {
         );
     }
     println!();
+}
 
-    let mut kept = Kept::default();
-    let mut idle = 0;
+/// What the unit threads and the arguing thread share.
+struct Shared {
+    /// Memory permits. Concurrency is whatever this admits, which is the point of it.
+    allowance: Arc<Allowance>,
+    /// Honest-path bytes, downloaded once for the whole machine rather than once per thread.
+    modules: Mutex<HashMap<String, Held>>,
+    /// Unit threads still running. The arguing thread waits for this to reach zero.
+    working: AtomicUsize,
+    /// What was learned about the machine, kept for the checkpoint budget a dispute gets.
+    survey: Survey,
+}
+
+/// A cached module and what it costs to run one.
+#[derive(Clone)]
+struct Held {
+    bytes: Arc<Vec<u8>>,
+    /// The declared memory ceiling in bytes, which is what a thread claims before executing.
+    declares: u64,
+}
+
+/// One unit thread: lease, run, report, repeat.
+fn work(settings: &Volunteer<'_>, shared: &Shared, job: usize) {
+    let mut idle = 0_u32;
+    loop {
+        let busy = match take_a_unit(settings, shared, job) {
+            Ok(busy) => busy,
+            Err(e) => {
+                eprintln!("[job {job:02}] unit failed: {e}");
+                false
+            }
+        };
+
+        if busy {
+            idle = 0;
+            continue;
+        }
+
+        idle = idle.saturating_add(1);
+        if settings.idle_exit.is_some_and(|limit| idle >= limit) {
+            break;
+        }
+        thread::sleep(IDLE);
+    }
+    // Announce departure *after* the loop, so the arguing thread cannot start its own countdown
+    // while this one is still capable of picking up work.
+    shared.working.fetch_sub(1, Ordering::SeqCst);
+}
+
+/// The arguing thread: answer challenges, and be the last to leave.
+fn argue(settings: &Volunteer<'_>, shared: &Shared) -> Result<(), String> {
+    let mut kept = Arguing::default();
     let mut answered: Option<u64> = None;
+    let mut idle = 0_u32;
 
     loop {
-        // A dispute is holding two volunteers and a unit; work can wait.
-        match challenge(settings, &mut kept, &mut answered) {
+        match challenge(settings, shared, &mut kept, &mut answered) {
             Ok(Turn::Answered) => {
                 idle = 0;
                 continue;
@@ -137,19 +276,15 @@ pub fn serve(settings: &Volunteer<'_>) -> Result<(), String> {
             Err(e) => eprintln!("challenge failed: {e}"),
         }
 
-        match take_a_unit(settings, &mut kept) {
-            Ok(true) => {
-                idle = 0;
-                continue;
+        // Only once every unit thread has given up is there any question of leaving — and even
+        // then it takes another `--idle-exit` rounds of silence, any one of which a question
+        // would reset.
+        if shared.working.load(Ordering::SeqCst) == 0 {
+            idle = idle.saturating_add(1);
+            if settings.idle_exit.is_some_and(|limit| idle >= limit) {
+                println!("nothing left to do");
+                return Ok(());
             }
-            Ok(false) => {}
-            Err(e) => eprintln!("unit failed: {e}"),
-        }
-
-        idle += 1;
-        if settings.idle_exit.is_some_and(|limit| idle >= limit) {
-            println!("nothing left to do");
-            return Ok(());
         }
         thread::sleep(IDLE);
     }
@@ -166,7 +301,7 @@ enum Turn {
     Nothing,
 }
 
-/// What a volunteer remembers between polls.
+/// What the arguing thread remembers between polls. Never touched by a unit thread.
 ///
 /// # Why a replay is kept per dispute
 ///
@@ -180,25 +315,28 @@ enum Turn {
 /// `checkpointing_changes_speed_and_nothing_else` — because a resumed machine is a bit-exact
 /// copy of one that got there by stepping. A warm replay and a cold one answer identically, so
 /// this is a speed decision and never a protocol one.
+///
+/// How *many* states it keeps is the same kind of decision, and it is the one that has to fit on
+/// the machine: see [`capacity::checkpoints`].
 #[derive(Default)]
-struct Kept {
-    /// Honest-path bytes, for wasmtime.
-    running: HashMap<String, Vec<u8>>,
-    /// Dispute-path images, decoded once.
+struct Arguing {
+    /// Dispute-path images, decoded once, with the checkpoint budget this machine can afford
+    /// for a dispute over one.
     ///
     /// Leaked deliberately. A [`Replay`] borrows its image and a volunteer holds one for as long
     /// as a dispute lasts; making that borrow live long enough without leaking means a
     /// self-referential struct, or an `Arc` the runtime does not ask for. A volunteer sees a
     /// handful of workloads of a few kilobytes each, and this cache never evicted them anyway.
-    images: HashMap<String, &'static Image<'static>>,
+    images: HashMap<String, (&'static Image<'static>, usize)>,
     /// One replay per dispute, so its checkpoints survive between questions.
     replays: HashMap<u64, Replay<'static>>,
 }
 
-/// Answer a challenge if there is one. `true` if something was done.
+/// Answer a challenge if there is one.
 fn challenge(
     settings: &Volunteer<'_>,
-    kept: &mut Kept,
+    shared: &Shared,
+    kept: &mut Arguing,
     answered: &mut Option<u64>,
 ) -> Result<Turn, String> {
     let asked = client::get(&format!(
@@ -250,17 +388,16 @@ fn challenge(
     // The *dispute-path* module: a different program from the one this volunteer ran, with
     // different instruction counts. "Step 40,000" names a state only if both parties replay the
     // same bytes.
-    let image = dispute_image(settings, kept, &workload)?;
+    let (image, budget) = dispute_image(settings, shared, kept, &workload)?;
 
     let started = Instant::now();
     let honest = match question {
         // The one question asked repeatedly, and the only one worth keeping a replay warm for.
         // Everything else happens once per dispute.
         Question::Root { step } => {
-            let replay = kept
-                .replays
-                .entry(dispute_id)
-                .or_insert_with(|| Replay::new(image, input.clone(), Limits::default()));
+            let replay = kept.replays.entry(dispute_id).or_insert_with(|| {
+                Replay::with_checkpoint_budget(image, input.clone(), Limits::default(), budget)
+            });
             Answer::Root(replay.root_at(Step::new(step)).unwrap_or(None))
         }
         other => dispute::answer(image, &input, Limits::default(), other)
@@ -300,7 +437,7 @@ fn challenge(
 }
 
 /// Take one unit, run it, report the answer. `true` if there was one.
-fn take_a_unit(settings: &Volunteer<'_>, kept: &mut Kept) -> Result<bool, String> {
+fn take_a_unit(settings: &Volunteer<'_>, shared: &Shared, job: usize) -> Result<bool, String> {
     let leased = client::get(&format!(
         "{}/api/lease?worker={}",
         settings.base, settings.name
@@ -319,10 +456,22 @@ fn take_a_unit(settings: &Volunteer<'_>, kept: &mut Kept) -> Result<bool, String
     let workload = read("workload")?;
     let input = unhex(&read("input")?).ok_or_else(|| "input was not hex".to_owned())?;
 
-    let module = running_module(settings, kept, &workload)?;
-    let started = Instant::now();
-    let executed = host::execute(module, &input)?;
-    let elapsed = started.elapsed();
+    let module = running_module(settings, shared, &workload)?;
+
+    // Pay for the memory before touching it, and give it back on the way out however this
+    // returns. Between here and the drop is the only window in which this thread costs the
+    // machine anything, which is why the claim is this narrow: downloading, parsing and
+    // reporting all happen outside it.
+    let queued = Instant::now();
+    let (executed, elapsed) = {
+        let _claim = shared.allowance.claim(module.declares);
+        let waited = queued.elapsed();
+        if waited > Duration::from_millis(1) {
+            println!("[job {job:02}] waited {waited:.1?} for memory before unit {unit}");
+        }
+        let started = Instant::now();
+        (host::execute(&module.bytes, &input)?, started.elapsed())
+    };
 
     // A wrong answer is what starts a dispute; whether the party then lies about the trace is
     // what decides how it ends.
@@ -342,7 +491,7 @@ fn take_a_unit(settings: &Volunteer<'_>, kept: &mut Kept) -> Result<bool, String
 
     let reported = client::post(&url, hex(&output).as_bytes())?;
     println!(
-        "unit {unit:<3}      {elapsed:.1?}, {} → {}",
+        "[job {job:02}] unit {unit:<3} {elapsed:.1?}, {} → {}",
         executed.fuel.map_or_else(
             || "cost not reported".to_owned(),
             |f| format!("{f} instructions")
@@ -372,37 +521,75 @@ fn distort(settings: &Volunteer<'_>, question: Question, honest: Answer) -> Answ
     }))
 }
 
-/// The honest-path bytes for a workload, fetched once and kept.
-fn running_module<'a>(
+/// The honest-path bytes for a workload, fetched once for the whole machine.
+///
+/// The download happens **outside** the cache lock. Holding a mutex across a network request
+/// would mean the first thread to want a new workload stops every other thread from starting
+/// anything at all, which is a straightforward way to turn sixteen cores back into one. Two
+/// threads racing to download the same module is a wasted request and nothing worse.
+fn running_module(
     settings: &Volunteer<'_>,
-    kept: &'a mut Kept,
+    shared: &Shared,
     workload: &str,
-) -> Result<&'a [u8], String> {
-    if !kept.running.contains_key(workload) {
-        let bytes = download(settings, workload, false)?;
-        kept.running.insert(workload.to_owned(), bytes);
-    }
-    kept.running
+) -> Result<Held, String> {
+    if let Some(held) = shared
+        .modules
+        .lock()
+        .map_err(|_| "module cache poisoned")?
         .get(workload)
-        .map(Vec::as_slice)
-        .ok_or_else(|| "the module vanished from the cache".to_owned())
+    {
+        return Ok(held.clone());
+    }
+
+    let bytes = download(settings, workload, false)?;
+    // A module that declares no maximum was refused at registration, so this only happens if the
+    // coordinator served something it never admitted. Assume the worst the network permits
+    // rather than assume nothing: under-parallelising is recoverable and over-committing is not.
+    let declares = capacity::per_unit_bytes(
+        validate::declared_memory_pages(&bytes)
+            .unwrap_or_else(|| validate::Limits::default().max_memory_pages),
+    );
+    let held = Held {
+        bytes: Arc::new(bytes),
+        declares,
+    };
+
+    shared
+        .modules
+        .lock()
+        .map_err(|_| "module cache poisoned")?
+        .insert(workload.to_owned(), held.clone());
+    Ok(held)
 }
 
 /// The dispute-path image for a workload, decoded once and kept for as long as this runs.
+///
+/// Returns the checkpoint budget with it, because both are properties of the workload and
+/// deciding the budget twice is how the two would come to disagree.
 fn dispute_image(
     settings: &Volunteer<'_>,
-    kept: &mut Kept,
+    shared: &Shared,
+    kept: &mut Arguing,
     workload: &str,
-) -> Result<&'static Image<'static>, String> {
-    if let Some(image) = kept.images.get(workload) {
-        return Ok(image);
+) -> Result<(&'static Image<'static>, usize), String> {
+    if let Some(known) = kept.images.get(workload) {
+        return Ok(*known);
     }
-    let bytes: &'static [u8] = Box::leak(download(settings, workload, true)?.into_boxed_slice());
+    let downloaded = download(settings, workload, true)?;
+    let budget = capacity::checkpoints(
+        &shared.survey,
+        capacity::per_unit_bytes(
+            validate::declared_memory_pages(&downloaded)
+                .unwrap_or_else(|| validate::Limits::default().max_memory_pages),
+        ),
+    );
+
+    let bytes: &'static [u8] = Box::leak(downloaded.into_boxed_slice());
     let image: &'static Image<'static> = Box::leak(Box::new(
         image::decode(bytes).map_err(|e| format!("could not decode the module: {e}"))?,
     ));
-    kept.images.insert(workload.to_owned(), image);
-    Ok(image)
+    kept.images.insert(workload.to_owned(), (image, budget));
+    Ok((image, budget))
 }
 
 fn download(settings: &Volunteer<'_>, workload: &str, disputable: bool) -> Result<Vec<u8>, String> {
@@ -412,6 +599,26 @@ fn download(settings: &Volunteer<'_>, workload: &str, disputable: bool) -> Resul
         return Err(format!("module {workload}: {}", fetched.status));
     }
     Ok(fetched.body)
+}
+
+/// Bytes, for a person reading one line of startup output.
+///
+/// The float is for the printing and nothing else. Every decision in this file is made on the
+/// integers — `float_cmp` is denied in this workspace for a reason, and a size in a header is the
+/// one place a rounded number is the right answer.
+#[allow(clippy::cast_precision_loss)]
+fn human(bytes: u64) -> String {
+    const UNITS: [(&str, u64); 3] = [
+        ("GiB", 1024 * 1024 * 1024),
+        ("MiB", 1024 * 1024),
+        ("KiB", 1024),
+    ];
+    for (name, size) in UNITS {
+        if bytes >= size {
+            return format!("{:.1} {name}", bytes as f64 / size as f64);
+        }
+    }
+    format!("{bytes} B")
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -430,4 +637,18 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         .step_by(2)
         .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sizes_are_printed_for_a_person_rather_than_a_machine() {
+        assert_eq!(human(0), "0 B");
+        assert_eq!(human(512), "512 B");
+        assert_eq!(human(1536), "1.5 KiB");
+        assert_eq!(human(256 * 1024 * 1024), "256.0 MiB");
+        assert_eq!(human(3 * 1024 * 1024 * 1024 / 2), "1.5 GiB");
+    }
 }

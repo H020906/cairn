@@ -123,6 +123,47 @@ fn the_same_worker_is_never_given_the_same_unit_twice() {
 }
 
 #[test]
+fn a_worker_using_every_core_holds_many_leases_and_still_gets_one_vote_on_each() {
+    // The scheduler's half of multi-core volunteering, and the reason a sixteen-thread machine
+    // reports under **one** name rather than sixteen.
+    //
+    // Both halves have to hold at once. A machine that could not hold several leases would waste
+    // fifteen cores; a machine that could hold two leases *on the same unit* would satisfy a
+    // quorum of two by itself, and the "two independent executions" a replicated unit is supposed
+    // to buy would be one machine agreeing with itself. Registering as sixteen workers is exactly
+    // how somebody would get the first without noticing they had lost the second.
+    let mut grid = Grid::new().with_replication(100);
+    let id = grid.register("test", WORKLOAD.as_bytes()).unwrap();
+    let units: Vec<usize> = (1..=4)
+        .map(|n| grid.submit(&id, vec![b'x'; n]).unwrap())
+        .collect();
+
+    let now = Instant::now();
+    let mut leased = Vec::new();
+    while let Some(assignment) = grid.lease("one-machine", now) {
+        leased.push(assignment.unit);
+    }
+
+    assert_eq!(leased.len(), units.len(), "every unit should be workable");
+    leased.sort_unstable();
+    assert_eq!(leased, units, "and each of them exactly once");
+
+    // Answering them all does not make this machine eligible to confirm any of them.
+    for (n, unit) in units.iter().enumerate() {
+        grid.submit_result(*unit, answer("one-machine", expected(n as u32 + 1)))
+            .unwrap();
+    }
+    assert!(
+        grid.lease("one-machine", now).is_none(),
+        "a quorum of two must not be reachable by one machine, however many cores it has"
+    );
+    assert!(
+        grid.lease("another-machine", now).is_some(),
+        "the second opinion is still owed to somebody else"
+    );
+}
+
+#[test]
 fn a_disagreement_between_parties_that_cannot_argue_is_settled_by_re_execution() {
     // The fallback route, and it is a route rather than a gap. Neither of these volunteers can
     // answer a challenge — that is what `bisects: false` says — so there is nobody to bisect

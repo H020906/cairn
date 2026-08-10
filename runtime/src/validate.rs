@@ -359,6 +359,38 @@ pub fn validate_submitted(bytes: &[u8], limits: Limits) -> Result<ModuleFacts, R
     inspect(bytes, limits)
 }
 
+/// The memory ceiling a module declares, in 64 KiB pages. Reads one section and checks nothing.
+///
+/// A volunteer needs this number *before* it runs anything, because it is the only honest way to
+/// answer "how many of these can this machine run at once" — see `worker-native/src/capacity.rs`.
+/// That question cannot be answered through [`validate_submitted`]: the bytes a volunteer is sent
+/// are already **canonical**, validated and instrumented once at registration, and re-running the
+/// whole gate on every worker would pay for the entire admission check to learn a single integer.
+///
+/// So this is deliberately not a check. A module with no memory section, or one that declares no
+/// maximum, returns `None`, and the caller's business is then to be careful rather than to
+/// reject — [`validate_submitted`] already refused both of those at registration, and a volunteer
+/// that started second-guessing the coordinator's admission decisions would be a second, weaker
+/// implementation of the gate.
+///
+/// Instrumentation adds functions, globals and calls; it never touches the memory section. So a
+/// submitted module and the canonical module made from it declare the same ceiling, which is what
+/// makes this usable on the bytes a worker actually holds.
+#[must_use]
+pub fn declared_memory_pages(bytes: &[u8]) -> Option<u32> {
+    for payload in Parser::new(0).parse_all(bytes) {
+        let Ok(Payload::MemorySection(reader)) = payload else {
+            continue;
+        };
+        // The first memory, because Cairn admits exactly one. Taking the first rather than
+        // insisting on it keeps this a reader: a hypothetical second memory is the gate's
+        // problem, not this function's.
+        let memory = reader.into_iter().next()?.ok()?;
+        return u32::try_from(memory.maximum?).ok();
+    }
+    None
+}
+
 /// Walk the module applying Cairn's structural rules. Assumes spec validity.
 fn inspect(bytes: &[u8], limits: Limits) -> Result<ModuleFacts, Rejection> {
     // Function types, in type-section order. Needed to check host import signatures.
@@ -575,6 +607,46 @@ mod tests {
                 imports_input: true,
                 imports_output: true,
             }
+        );
+    }
+
+    #[test]
+    fn the_declared_ceiling_survives_instrumentation() {
+        // The claim `declared_memory_pages` is built on, and the reason a volunteer may read it
+        // from the canonical bytes it was actually sent rather than from a submission it never
+        // sees. If instrumentation ever grew a reason to touch the memory section — a scratch
+        // page for metering, say — a volunteer would silently budget for the wrong workload,
+        // and this is where that shows up.
+        let submitted = wasm(VALID);
+        let facts = validate_submitted(&submitted, Limits::default()).expect("must validate");
+        assert_eq!(
+            declared_memory_pages(&submitted),
+            Some(facts.memory_pages_max)
+        );
+
+        for config in [
+            crate::canon::Config::honest_path(),
+            crate::canon::Config::dispute_path(),
+        ] {
+            let canonical = crate::canon::instrument(&submitted, config).expect("must instrument");
+            assert_eq!(
+                declared_memory_pages(&canonical),
+                Some(facts.memory_pages_max),
+                "instrumentation changed the declared memory ceiling"
+            );
+        }
+    }
+
+    #[test]
+    fn a_module_with_nothing_to_read_reports_nothing_rather_than_a_guess() {
+        // Both of these were refused at registration, so a volunteer only meets them if the
+        // coordinator served something it never admitted. `None` is what makes the caller
+        // assume the worst the network permits; a default here would hide that.
+        assert_eq!(declared_memory_pages(&[]), None);
+        assert_eq!(
+            declared_memory_pages(&wasm(r#"(module (memory 1) (func (export "cairn_run")))"#)),
+            None,
+            "a memory with no declared maximum has no ceiling to report"
         );
     }
 

@@ -249,6 +249,47 @@ re-execution — the most expensive path in the system, reached in the *ordinary
 the adversarial one. See
 [ADR-0012](adr/0012-the-answer-is-part-of-the-committed-state.md).
 
+## 5d · What one donated machine is actually worth
+
+A volunteer uses every core it can spare. How many that is, is worked out rather than asked for —
+`--jobs` can only lower it — and the reason is in
+[ADR-0013](adr/0013-a-volunteer-computes-its-own-parallelism.md).
+
+`workloads/examples/busy-loop.wat` is `sum-of-squares` with a longer loop, sized so that a unit
+takes long enough to measure. Queue a few hundred units of it and run one volunteer twice:
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --jobs 1
+```
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080
+```
+
+On the machine this was written on — an i5-13500H, 4 performance cores + 8 efficiency cores,
+16 hardware threads, 400 units:
+
+| jobs | wall clock | units/s | speedup | efficiency |
+|---:|---:|---:|---:|---:|
+| 1 | 56.0 s | 7.14 | 1.00× | 100% |
+| 2 | 26.7 s | 14.96 | 2.09× | 105% |
+| 4 | 15.1 s | 26.52 | 3.71× | 93% |
+| 8 | 10.3 s | 38.81 | 5.43× | 68% |
+| 12 | 8.3 s | 48.39 | 6.77× | 56% |
+| 15 | 7.7 s | 51.68 | **7.24×** | 48% |
+
+**Seven times, from fifteen threads — and the missing half is the machine, not the scheduler.**
+Look at where it bends: four, which is exactly the number of performance cores. Each unit line
+prints its own execution time, which settles the rest: alone a unit takes 136 ms, and with fifteen
+running it takes 272 ms. Every thread is doing 49% of its solo work, so the machine's aggregate
+ceiling is about 7.4× and Cairn is getting 96% of it.
+
+That 49% is what a hybrid laptop CPU is — four performance cores, eight efficiency cores at
+roughly half the throughput each, and lower clocks when they are all busy. It generalises:
+**donated throughput follows physical silicon and thermal headroom, not the core count the
+operating system reports.** Anyone sizing a volunteer grid by adding up reported cores will be
+out by close to a factor of two.
+
 ## 6 · Just the browser worker, with no coordinator
 
 ```bash
@@ -279,7 +320,7 @@ small unit is not a measurement. **What this page demonstrates is agreement, not
 ## Checking the claims instead of believing them
 
 ```bash
-cargo test --workspace        # 280 tests
+cargo test --workspace        # 294 tests
 cargo bench                   # regenerates docs/benchmarks.md
 ```
 

@@ -40,7 +40,7 @@ machine in about two minutes:
 cargo test --workspace
 ```
 
-280 tests. If they are green, the following is true.
+294 tests. If they are green, the following is true.
 
 **You can take an untrusted WebAssembly module and make it deterministic.** `validate.rs`
 rejects anything with a host-dependent escape (threads, SIMD, reference types, any import
@@ -95,10 +95,11 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
 
 And one thing that *does* exist and is the fastest way in:
 
-- **`worker-native/` — `cairn-worker`.** Four commands: `run` a unit on wasmtime, `trace` one
+- **`worker-native/` — `cairn-worker`.** Five commands: `run` a unit on wasmtime, `trace` one
   on the interpreter, `dispute` two claimed executions end to end, `prepare` the canonical
-  binary a coordinator would hand out. Running the third is the shortest path to understanding
-  what this project is.
+  binary a coordinator would hand out, and `volunteer` to join a running coordinator on every
+  core the machine can spare. Running `dispute` is the shortest path to understanding what this
+  project is.
 - **`browser/` — the same volunteer, in a tab.** `node browser/server.js`, no toolchain. It is
   worth opening next to `cairn-worker trace`: three engines, one answer, and the same
   instruction count reached two different ways.

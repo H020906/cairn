@@ -23,6 +23,7 @@ done this way?"*
 | [0010](0010-the-referee-executes-so-the-coordinator-is-rust.md) | The referee executes, so the coordinator is Rust | Accepted, corrects 0002 in part |
 | [0011](0011-a-volunteer-that-cannot-argue-is-not-challenged.md) | A volunteer that cannot argue is not challenged | Accepted, corrects 0010 in part |
 | [0012](0012-the-answer-is-part-of-the-committed-state.md) | The answer is part of the committed state | Accepted, completes 0011 |
+| [0013](0013-a-volunteer-computes-its-own-parallelism.md) | A volunteer computes its own parallelism, and reports under one name | Accepted |
 
 ## Reading order
 
@@ -73,6 +74,13 @@ exercised.
 If you read only two of these, read 0005 and 0008 — the two places where the project asked
 "but who is actually doing this?" and got an unwelcome answer. 0011's Finding 2 is the same
 question asked a third time, about the volunteer this project is supposed to be for.
+
+**0013** is the first one about the volunteer's own machine rather than about the protocol. It is
+short and worth reading for two things: a setting that is dangerous because a plausible answer is
+easy to give, and a scaling curve that bends at exactly the machine's performance-core count. A
+sixteen-thread laptop donates about seven cores' worth of work, so counting reported cores
+over-promises by nearly 2× — a fact about hardware that any distributed-computing project will
+meet and few write down.
 
 ## Format
 

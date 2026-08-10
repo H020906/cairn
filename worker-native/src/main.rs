@@ -41,6 +41,7 @@ use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
 use cairn_runtime::validate;
 
+mod capacity;
 mod client;
 mod host;
 mod volunteer;
@@ -53,7 +54,8 @@ USAGE
     cairn-worker trace     <module> [input-file]
     cairn-worker dispute   <module> <assigned-input> <claimed-input>
     cairn-worker prepare   <module> <output.wasm> [--count-fuel]
-    cairn-worker volunteer <coordinator-url> [--name NAME] [--idle-exit N] [--lie-from STEP]
+    cairn-worker volunteer <coordinator-url> [--name NAME] [--jobs N] [--memory MiB]
+                                            [--idle-exit N] [--lie-from STEP]
 
     <module> is a .wasm binary or a .wat text module.
     An omitted input file means an empty input.
@@ -91,7 +93,19 @@ WHAT EACH ONE DOES
               arguing volunteers settles a disagreement in ~log2(n) messages rather than by
               re-executing the unit. See docs/adr/0011.
 
-              --idle-exit N   stop after N consecutive polls with nothing to do
+              It uses every core the machine can spare, under ONE worker name — one machine,
+              one vote, whatever it is running on. How many units run at once is worked out
+              from memory rather than asked for, because a workload may declare up to 256 MiB
+              and a plausible-looking number would take a laptop down. --jobs can lower it.
+
+              --jobs N        donate at most N units at once (default: cores - 1, capped at 32)
+              --memory MiB    how much memory this machine can spare. Only Linux can be asked
+                              this without unsafe code, so everywhere else it is assumed
+                              conservatively and the startup header says so.
+              --idle-exit N   stop after N consecutive polls with nothing to do. The arguing
+                              thread starts counting only once the unit threads have stopped,
+                              and any challenge at all resets it: leaving mid-dispute is
+                              abandonment, which loses by default.
               --lie-from S    return a wrong answer AND defend it with corrupted roots from
                               step S. A liar has to lie twice, and this one does: bisection
                               converges on step S and convicts it.
@@ -274,11 +288,32 @@ fn enlist(base: &str, flags: &[&str]) -> Result<(), String> {
     let mut idle_exit = None;
     let mut lies_from = None;
     let mut wrong_answer = false;
+    let mut jobs = None;
+    let mut memory = None;
 
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
         match *flag {
             "--name" => name = (*rest.next().ok_or("--name needs a value")?).to_owned(),
+            "--jobs" => {
+                let asked: usize = rest
+                    .next()
+                    .ok_or("--jobs needs a count")?
+                    .parse()
+                    .map_err(|_| "--jobs needs a number")?;
+                if asked == 0 {
+                    return Err("--jobs 0 donates nothing; leave the flag off instead".to_owned());
+                }
+                jobs = Some(asked);
+            }
+            "--memory" => {
+                let mib: u64 = rest
+                    .next()
+                    .ok_or("--memory needs a size in MiB")?
+                    .parse()
+                    .map_err(|_| "--memory needs a number of MiB")?;
+                memory = Some(mib.saturating_mul(1024 * 1024));
+            }
             "--idle-exit" => {
                 idle_exit = Some(
                     rest.next()
@@ -303,6 +338,8 @@ fn enlist(base: &str, flags: &[&str]) -> Result<(), String> {
     volunteer::serve(&volunteer::Volunteer {
         base,
         name: &name,
+        jobs,
+        memory,
         lies_from,
         wrong_answer,
         idle_exit,
