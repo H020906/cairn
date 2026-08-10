@@ -109,6 +109,14 @@ jobs:
         # it was winning. Both were found by running it. See docs/adr/0011.
         run: cargo test -p cairn-coordinator --release --test interactive
 
+      - name: The answer is part of the committed state
+        # A commitment that covered how the machine ran but not what it *said* would let two
+        # parties agree on a million roots and prove nothing about the result. Exactly one test
+        # here catches that field being dropped from the root -- checked by deleting it and
+        # watching which one fails -- and one walks 0..=total, because a witness of the FINAL
+        # state was the case nothing had ever asked for and it was broken. See docs/adr/0012.
+        run: cargo test -p cairn-runtime --release --test answer_is_committed
+
       - name: A state witness survives a hostile wire
         # `wire.rs` decodes bytes sent by a party with a direct interest in the outcome, so it
         # is held to `validate.rs`'s standard: never panic, never allocate on a stranger's

@@ -341,11 +341,16 @@ fn a_party_that_stops_answering_loses_by_default() {
 }
 
 #[test]
-fn two_honest_parties_that_disagree_are_not_convicted_but_settled() {
-    // The case the fallback exists for, and it is not a gap. Both parties replay the *same bytes
-    // on the same input under the same deterministic interpreter*, so both replays reproduce the
-    // truth and bisection finds nothing to convict. Nobody lied; one of them merely returned a
-    // wrong answer, and naming it costs a re-execution.
+fn two_honest_parties_that_disagree_are_settled_without_executing_anything() {
+    // **The non-adversarial case, and it used to be the most expensive path in the system.**
+    // Both parties replay the same bytes under the same deterministic interpreter, so both
+    // reproduce the truth and bisection finds nothing to convict — nobody lied, one of them was
+    // merely wrong. Naming the wrong answer used to cost the coordinator a full interpreted
+    // re-execution.
+    //
+    // It no longer does, because the answer is part of the committed state: the trace they agree
+    // on *determines* what the answer was, so one witness of the final state plus two hash
+    // comparisons settles it. Nothing is executed — not the unit, and not even one instruction.
     let input = b"honest";
     let (grid, unit, module) = ready(input, Duration::from_secs(30));
 
@@ -369,17 +374,15 @@ fn two_honest_parties_that_disagree_are_not_convicted_but_settled() {
 
     let (conclusion, output, _) = await_conclusion(&grid, dispute);
     match conclusion {
+        Conclusion::AgreedOnTrace { wrong, .. } => assert_eq!(
+            wrong,
+            Some(Party::Second),
+            "the trace both parties agreed on names the party whose answer contradicted it"
+        ),
         Conclusion::FellBack { why, verdict } => {
-            assert!(
-                why.contains("no dispute to settle") || why.contains("agree"),
-                "the parties' replays agreed, so bisection had nothing to do: {why}"
-            );
-            assert!(
-                verdict.contains("second party"),
-                "re-execution still names the wrong answer: {verdict}"
-            );
+            panic!("this should no longer need re-execution: {why} / {verdict}")
         }
-        other => panic!("expected a fallback, got {other:?}"),
+        other => panic!("expected agreement on the trace, got {other:?}"),
     }
     assert_eq!(output, Some(expected(6)));
     a.join().unwrap();

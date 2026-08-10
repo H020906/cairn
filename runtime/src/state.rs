@@ -26,12 +26,18 @@
 //! # What a commitment covers
 //!
 //! ```text
-//! root = H( domain ‖ memory_root ‖ globals ‖ operand_stack ‖ call_stack ‖ pc ‖ fuel )
+//! root = H( domain ‖ memory_root ‖ globals ‖ operand_stack ‖ call_stack
+//!           ‖ segments ‖ output ‖ pc ‖ fuel )
 //! ```
 //!
 //! The memory root comes from [`crate::merkle::PageTree`], so it is cheap to maintain
 //! incrementally and supports single-page proofs during arbitration. The other components are
 //! small enough to hash outright.
+//!
+//! **`output` is the answer**, and it is here because a commitment that did not cover it would
+//! let two executions agree at every step while having returned different results — leaving the
+//! coordinator with two matching traces and no way to say which answer was right. See
+//! [`StateCommitment::output`].
 
 use crate::fuel::Fuel;
 use crate::merkle::Hash;
@@ -59,6 +65,9 @@ const DOMAIN_CALL_STACK: u8 = 0x07;
 
 /// Domain separator for the dropped-segment bitmaps.
 const DOMAIN_SEGMENTS: u8 = 0x08;
+
+/// Domain separator for the output buffer.
+const DOMAIN_OUTPUT: u8 = 0x09;
 
 /// A WebAssembly numeric value, as it appears on the operand stack, in a local, or in a global.
 ///
@@ -258,6 +267,19 @@ pub fn hash_segments(dropped_data: &[bool], dropped_elements: &[bool]) -> Hash {
     *hasher.finalize().as_bytes()
 }
 
+/// Commit to what the workload has answered so far.
+///
+/// Length-prefixed, so that an empty output and a zero-length write are the same state — they
+/// are — while no two different byte strings can collide by concatenation.
+#[must_use]
+pub fn hash_output(output: &[u8]) -> Hash {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(&[DOMAIN_OUTPUT]);
+    hasher.update(&(output.len() as u64).to_le_bytes());
+    hasher.update(output);
+    *hasher.finalize().as_bytes()
+}
+
 /// Where execution has reached: an instruction within a function.
 ///
 /// Both indices refer to the *instrumented* module, which is the only module any worker ever
@@ -306,6 +328,24 @@ pub struct StateCommitment {
     pub call_stack: Hash,
     /// [`hash_segments`] over the dropped data and element segments.
     pub segments: Hash,
+    /// [`hash_output`] over the bytes written through `cairn.output` so far.
+    ///
+    /// # Why the answer is part of the state
+    ///
+    /// Without this, two executions could commit to identical roots at every step and still
+    /// have returned **different answers** — and a coordinator holding two agreeing traces
+    /// would have proved nothing about the thing it actually cares about. Bisection would
+    /// report no disagreement, correctly, and the disagreement would still be there.
+    ///
+    /// With it, a state root *determines* the answer: agreeing traces agree on the output, and
+    /// a single party's witness at the final step proves what the answer was, against a root
+    /// both parties already committed to. That turns "these two agree, so who was wrong about
+    /// the answer?" from a full re-execution into a hash comparison.
+    ///
+    /// A digest rather than the bytes, because `cairn.output` **replaces** rather than appends
+    /// — nothing ever reads the buffer back — so a witness never has to carry it. Which is what
+    /// keeps a witness small on a workload that returns a megabyte.
+    pub output: Hash,
     /// The instruction about to execute.
     pub program_counter: ProgramCounter,
     /// Instructions retired so far. This is the coordinate bisection searches over.
@@ -326,6 +366,7 @@ impl StateCommitment {
         hasher.update(&self.operand_stack);
         hasher.update(&self.call_stack);
         hasher.update(&self.segments);
+        hasher.update(&self.output);
         hasher.update(&self.program_counter.encode());
         hasher.update(&self.fuel.get().to_le_bytes());
         *hasher.finalize().as_bytes()
@@ -342,6 +383,7 @@ mod tests {
     fn commitment() -> StateCommitment {
         StateCommitment {
             memory: PageTree::new(4).root(),
+            output: hash_output(b"answer"),
             globals: hash_values(&[Value::I32(1)]),
             operand_stack: hash_values(&[Value::I64(2)]),
             call_stack: hash_values(&[Value::I32(3)]),
@@ -483,6 +525,7 @@ mod tests {
             operand_stack: [0; 32],
             call_stack: [0; 32],
             segments: [0; 32],
+            output: [0; 32],
             program_counter: ProgramCounter::default(),
             fuel: Fuel::ZERO,
         };

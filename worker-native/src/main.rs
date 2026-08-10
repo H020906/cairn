@@ -91,12 +91,17 @@ WHAT EACH ONE DOES
               arguing volunteers settles a disagreement in ~log2(n) messages rather than by
               re-executing the unit. See docs/adr/0011.
 
-              --idle-exit N  stop after N consecutive polls with nothing to do
-              --lie-from S   return a wrong answer AND defend it with corrupted roots from
-                             step S. A liar has to lie twice: an honest replay reproduces the
-                             truth whatever the volunteer originally returned, so a party that
-                             lies only once is not convicted, it is merely wrong. For the demo
-                             in docs/WALKTHROUGH.md.
+              --idle-exit N   stop after N consecutive polls with nothing to do
+              --lie-from S    return a wrong answer AND defend it with corrupted roots from
+                              step S. A liar has to lie twice, and this one does: bisection
+                              converges on step S and convicts it.
+              --wrong-answer  return a wrong answer but replay HONESTLY -- a broken engine
+                              rather than a liar. Bisection finds nothing to convict, and the
+                              trace both parties agree on names the wrong result instead,
+                              because the answer is part of the committed state. Nothing is
+                              executed by anybody. See docs/adr/0012.
+
+              Both are for the demonstrations in docs/WALKTHROUGH.md.
 ";
 
 fn main() -> ExitCode {
@@ -268,6 +273,7 @@ fn enlist(base: &str, flags: &[&str]) -> Result<(), String> {
     let mut name = format!("native-{}", std::process::id());
     let mut idle_exit = None;
     let mut lies_from = None;
+    let mut wrong_answer = false;
 
     let mut rest = flags.iter();
     while let Some(flag) = rest.next() {
@@ -289,6 +295,7 @@ fn enlist(base: &str, flags: &[&str]) -> Result<(), String> {
                         .map_err(|_| "--lie-from needs a number")?,
                 );
             }
+            "--wrong-answer" => wrong_answer = true,
             other => return Err(format!("unknown flag {other}")),
         }
     }
@@ -297,6 +304,7 @@ fn enlist(base: &str, flags: &[&str]) -> Result<(), String> {
         base,
         name: &name,
         lies_from,
+        wrong_answer,
         idle_exit,
     })
 }

@@ -421,6 +421,20 @@ fn conclusion_words(conclusion: &Conclusion) -> String {
         Conclusion::Abandoned { by, rounds } => {
             format!("the {by} stopped answering after {rounds} rounds and loses by default")
         }
+        Conclusion::AgreedOnTrace {
+            wrong: Some(wrong),
+            rounds,
+        } => format!(
+            "nobody lied — both parties' replays agreed, and the trace they agreed on says the \
+             {wrong} reported the wrong answer ({rounds} messages, nothing executed)"
+        ),
+        Conclusion::AgreedOnTrace {
+            wrong: None,
+            rounds,
+        } => format!(
+            "both parties agreed on a trace and both misreported what it answered \
+             ({rounds} messages, nothing executed)"
+        ),
         Conclusion::BothWrong { divergence, rounds } => format!(
             "both parties were wrong about the instruction at step {divergence} ({rounds} rounds)"
         ),

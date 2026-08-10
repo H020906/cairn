@@ -70,8 +70,26 @@ pub struct Volunteer<'a> {
     /// reproduces the truth, because the replay is deterministic. So this corrupts the output
     /// *and* every root at or after the given step.
     pub lies_from: Option<u64>,
+    /// Return a wrong answer but replay **honestly** — a broken engine, not a liar.
+    ///
+    /// The distinction the protocol turns on. This party is not caught by bisection at all: its
+    /// replay reproduces the truth and agrees with everybody, so nobody is convicted. It is
+    /// caught by the trace the two parties agree on, which says what the answer was, because
+    /// the answer is part of the committed state
+    /// ([ADR-0012](../../docs/adr/0012-the-answer-is-part-of-the-committed-state.md)).
+    pub wrong_answer: bool,
     /// Stop after this many consecutive idle polls. `None` runs until killed.
     pub idle_exit: Option<u32>,
+}
+
+impl Volunteer<'_> {
+    /// Whether this volunteer returns a result it did not compute.
+    ///
+    /// A liar has to lie twice, so `--lie-from` implies this; `--wrong-answer` is the first lie
+    /// without the second.
+    const fn returns_a_wrong_answer(&self) -> bool {
+        self.lies_from.is_some() || self.wrong_answer
+    }
 }
 
 /// Poll a coordinator, do its work, and answer for it afterwards.
@@ -88,7 +106,12 @@ pub fn serve(settings: &Volunteer<'_>) -> Result<(), String> {
         "can argue     yes — replays under Cairn's interpreter, so it can be a party to a dispute"
     );
     if let Some(from) = settings.lies_from {
-        println!("DISHONEST     corrupting results, and every claimed root from step {from}");
+        println!("DISHONEST     wrong results, and every claimed root corrupted from step {from}");
+    } else if settings.wrong_answer {
+        println!(
+            "BROKEN        wrong results, but replays honestly — not a liar, and bisection will \
+             not convict it"
+        );
     }
     println!();
 
@@ -301,8 +324,9 @@ fn take_a_unit(settings: &Volunteer<'_>, kept: &mut Kept) -> Result<bool, String
     let executed = host::execute(module, &input)?;
     let elapsed = started.elapsed();
 
-    // A liar's answer has to be wrong, or there is nothing to dispute.
-    let output = if settings.lies_from.is_some() {
+    // A wrong answer is what starts a dispute; whether the party then lies about the trace is
+    // what decides how it ends.
+    let output = if settings.returns_a_wrong_answer() {
         vec![0xde, 0xad, 0xbe, 0xef]
     } else {
         executed.output

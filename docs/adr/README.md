@@ -22,6 +22,7 @@ done this way?"*
 | [0009](0009-metering-through-a-global-the-engines-disagree.md) | Metering through a global: the two engines want opposite things | Accepted |
 | [0010](0010-the-referee-executes-so-the-coordinator-is-rust.md) | The referee executes, so the coordinator is Rust | Accepted, corrects 0002 in part |
 | [0011](0011-a-volunteer-that-cannot-argue-is-not-challenged.md) | A volunteer that cannot argue is not challenged | Accepted, corrects 0010 in part |
+| [0012](0012-the-answer-is-part-of-the-committed-state.md) | The answer is part of the committed state | Accepted, completes 0011 |
 
 ## Reading order
 
@@ -59,10 +60,15 @@ and replaces it with the number that does matter: a dispute costs each party an 
 re-execution, and the interpreter is 37×–142× slower than the JIT they ran the work on. That
 turns the dispute *rate* into a budget with an actual figure in it.
 
-Then **0010 and 0011** together, which are about the coordinator. 0010 found that the referee
-*executes*, so it cannot be the Java service ADR-0002 planned. 0011 built the interactive dispute
-protocol 0010 said was missing, and came back with four things that were only visible from
-inside it — including that the fallback 0010 called a gap is not one.
+Then **0010, 0011 and 0012** together, which are about the coordinator. 0010 found that the
+referee *executes*, so it cannot be the Java service ADR-0002 planned. 0011 built the interactive
+dispute protocol 0010 said was missing, and came back with four things that were only visible
+from inside it — including that the fallback 0010 called a gap is not one. 0012 closes the
+finding 0011 could only note: the commitment did not cover the workload's **answer**, so two
+parties could agree on a million roots and prove nothing about the result. Fixing that made the
+common, non-adversarial dispute cost four messages and no execution at all — and, on the way,
+surfaced a latent bug that had been convicting honest parties in a path nothing had ever
+exercised.
 
 If you read only two of these, read 0005 and 0008 — the two places where the project asked
 "but who is actually doing this?" and got an unwelcome answer. 0011's Finding 2 is the same

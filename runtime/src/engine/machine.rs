@@ -56,6 +56,17 @@ impl Default for Limits {
     }
 }
 
+/// The position a finished machine commits to.
+///
+/// Execution has ended, so no instruction is about to run and any value here is arbitrary — but
+/// it must be the **same** arbitrary value in both places a commitment is computed:
+/// [`Machine::commit`], which has the module, and [`Witness::commitment`], which does not. A
+/// constant is the only value both can produce.
+const FINISHED_PROGRAM_COUNTER: ProgramCounter = ProgramCounter {
+    function: 0,
+    instruction: 0,
+};
+
 /// What a single [`Machine::step`] accomplished.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[must_use = "a snapshot must be recorded and completion must stop the loop"]
@@ -390,6 +401,13 @@ pub struct Witness {
     pub dropped_data: Vec<bool>,
     /// Which element segments have been dropped.
     pub dropped_elements: Vec<bool>,
+    /// [`state::hash_output`] of what the workload has answered so far.
+    ///
+    /// A digest and not the bytes. `cairn.output` **replaces** rather than appends, so no
+    /// instruction ever reads the buffer back and an adjudicator never needs its contents — it
+    /// only needs to commit to them. That is what keeps a witness small on a workload whose
+    /// answer is a megabyte.
+    pub output: Hash,
     /// Fuel consumed.
     pub fuel: Fuel,
     /// Instructions executed.
@@ -434,16 +452,17 @@ impl Witness {
             operand_stack: state::hash_values(&self.operand_stack),
             call_stack: state::hash_frames(&frames),
             segments: state::hash_segments(&self.dropped_data, &self.dropped_elements),
-            program_counter: self.frames.last().map_or(
-                ProgramCounter {
-                    function: 0,
-                    instruction: 0,
-                },
-                |frame| ProgramCounter {
+            output: self.output,
+            // The same placeholder [`Machine::program_counter`] uses for a finished machine.
+            // These two must agree on every state a dispute can ask about, and the final state
+            // is one of them.
+            program_counter: self
+                .frames
+                .last()
+                .map_or(FINISHED_PROGRAM_COUNTER, |frame| ProgramCounter {
                     function: frame.function,
                     instruction: frame.instruction,
-                },
-            ),
+                }),
             fuel: self.fuel,
         }
     }
@@ -533,6 +552,17 @@ pub struct Machine<'a> {
     meter: FuelMeter,
     input: Vec<u8>,
     output: Vec<u8>,
+    /// [`state::hash_output`] of `output`, kept rather than recomputed.
+    ///
+    /// `commit()` runs at every snapshot boundary and at every bisection question, and hashing
+    /// the whole answer each time would make the cost of committing scale with the *answer*
+    /// rather than with the step.
+    ///
+    /// **The one place this and `output` disagree** is a machine rebuilt by [`Machine::restore`]:
+    /// a witness carries the digest and not the bytes, so `output` is empty there while this is
+    /// the real one. An adjudicator only commits and compares, so that is sound — but anything
+    /// that starts *reading* `output` after a restore is a bug, and this comment is the warning.
+    output_digest: Hash,
     dropped_data: Vec<bool>,
     dropped_elements: Vec<bool>,
     /// Instructions executed. The coordinate dispute bisection searches — see [`Snapshot`].
@@ -575,6 +605,7 @@ impl<'a> Machine<'a> {
             meter,
             input,
             output: Vec::new(),
+            output_digest: state::hash_output(&[]),
             dropped_data,
             dropped_elements,
             steps: 0,
@@ -617,6 +648,7 @@ impl<'a> Machine<'a> {
             operand_stack: state::hash_values(&self.stack),
             call_stack: state::hash_frames(&frames),
             segments: state::hash_segments(&self.dropped_data, &self.dropped_elements),
+            output: self.output_digest,
             program_counter: self.program_counter(),
             fuel: self.meter.consumed(),
         }
@@ -626,10 +658,17 @@ impl<'a> Machine<'a> {
     /// zero, so a finished execution still has a well-defined counter.
     fn program_counter(&self) -> ProgramCounter {
         self.frames.last().map_or(
-            ProgramCounter {
-                function: self.image.entry,
-                instruction: 0,
-            },
+            // A machine with no frames has finished. There is no instruction about to execute,
+            // so this value is a placeholder — but it is a *committed* placeholder, and
+            // [`Witness::commitment`] has to produce the same one from a witness that does not
+            // know the module's entry point.
+            //
+            // It used to be `self.image.entry` here and `0` there, which meant the two
+            // commitment paths disagreed about the final state of any module whose entry index
+            // was not zero. Nothing noticed until a dispute asked a party for a witness of the
+            // *final* state: the witness reconstructed a different root and was refused —
+            // reported, of course, as though the party had fabricated it.
+            FINISHED_PROGRAM_COUNTER,
             |frame| ProgramCounter {
                 function: frame.function,
                 instruction: frame.pc,
@@ -711,6 +750,7 @@ impl<'a> Machine<'a> {
         };
 
         Witness {
+            output: self.output_digest,
             globals: self.globals.clone(),
             operand_stack: self.stack.clone(),
             frames: self
@@ -878,8 +918,11 @@ impl<'a> Machine<'a> {
             table: install_table(image).map_err(|_| WitnessError::BadLimits)?,
             meter,
             input,
-            // Output is write-only and never read back, so an adjudicator starts it empty.
+            // Write-only and never read back, so the bytes are not carried and an adjudicator
+            // starts them empty. The *digest* is carried and is part of the commitment, or a
+            // restored machine would commit to a different state than the one it was given.
             output: Vec::new(),
+            output_digest: witness.output,
             dropped_data: witness.dropped_data.clone(),
             dropped_elements: witness.dropped_elements.clone(),
             steps: witness.steps,
@@ -1611,6 +1654,10 @@ impl<'a> Machine<'a> {
                 let len = self.pop_i32()? as u32 as usize;
                 let address = u64::from(self.pop_i32()? as u32);
                 self.output = self.memory.read(address, len)?.to_vec();
+                // The answer is part of the committed state, so writing it moves the state
+                // root. Without that, two executions could agree at every step and still have
+                // returned different answers — see `StateCommitment::output`.
+                self.output_digest = state::hash_output(&self.output);
             }
             HostFunction::Charge => return Err(Trap::Unreachable),
         }

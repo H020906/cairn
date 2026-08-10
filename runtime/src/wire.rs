@@ -37,7 +37,8 @@
 //!
 //! ```text
 //! magic    "CWTN"
-//! version  u8 = 1
+//! version  u8 = 2
+//! output   32 bytes (the digest of the answer so far)
 //! globals        u32 count, then count × value
 //! operand stack  u32 count, then count × value
 //! frames         u32 count, then count × frame
@@ -74,7 +75,12 @@ use crate::state::Value;
 const MAGIC: [u8; 4] = *b"CWTN";
 
 /// The only version this build speaks.
-const VERSION: u8 = 1;
+///
+/// Bumped to 2 when the answer became part of the committed state: a witness now carries an
+/// output digest, and a version-1 witness would reconstruct a *different* root rather than
+/// fail to parse. Refusing it outright is the difference between "your worker is out of date"
+/// and an unexplained conviction.
+const VERSION: u8 = 2;
 
 /// Smallest number of bytes one encoded value can occupy.
 const VALUE_MIN: usize = 9;
@@ -178,6 +184,7 @@ pub fn encode(witness: &Witness) -> Result<Vec<u8>, WireError> {
     let mut out = Vec::new();
     out.extend_from_slice(&MAGIC);
     out.push(VERSION);
+    out.extend_from_slice(&witness.output);
 
     put_values(&mut out, &witness.globals, "globals")?;
     put_values(&mut out, &witness.operand_stack, "operand stack entries")?;
@@ -280,6 +287,7 @@ pub fn decode(bytes: &[u8]) -> Result<Witness, WireError> {
         return Err(WireError::UnsupportedVersion { found: version });
     }
 
+    let output = r.hash("output digest")?;
     let globals = r.values("globals")?;
     let operand_stack = r.values("operand stack")?;
 
@@ -347,6 +355,7 @@ pub fn decode(bytes: &[u8]) -> Result<Witness, WireError> {
     }
 
     Ok(Witness {
+        output,
         globals,
         operand_stack,
         frames,
@@ -543,6 +552,7 @@ mod tests {
     /// which shapes a particular workload happens to produce.
     fn populated() -> Witness {
         Witness {
+            output: crate::state::hash_output(b"an answer"),
             globals: vec![
                 Value::I32(-1),
                 Value::I64(i64::MIN),
@@ -638,6 +648,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.push(VERSION);
+        bytes.extend_from_slice(&[0; 32]); // output digest
         bytes.extend_from_slice(&u32::MAX.to_le_bytes()); // globals
 
         match decode(&bytes) {
@@ -743,6 +754,17 @@ mod tests {
             decode(&wrong_version).unwrap_err(),
             WireError::UnsupportedVersion { found: 99 }
         );
+
+        // Version 1 is refused rather than read. It had no output digest, so a permissive
+        // decoder would produce a witness that reconstructs a *different* root — which reaches
+        // adjudication as "this witness does not match the agreed state" and looks like the
+        // party lied. A version check is what makes that an upgrade notice instead.
+        let mut version_one = encode(&populated()).unwrap();
+        version_one[4] = 1;
+        assert_eq!(
+            decode(&version_one).unwrap_err(),
+            WireError::UnsupportedVersion { found: 1 }
+        );
     }
 
     #[test]
@@ -750,6 +772,7 @@ mod tests {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&MAGIC);
         bytes.push(VERSION);
+        bytes.extend_from_slice(&[0; 32]); // output digest
         bytes.extend_from_slice(&1u32.to_le_bytes()); // one global
         bytes.push(0x7f); // no such type
         bytes.extend_from_slice(&0u64.to_le_bytes());

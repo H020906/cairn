@@ -222,10 +222,32 @@ party supplied the disputed state as a proof-carrying witness — 10.4 ms — an
 a single instruction to see which of the two claims about it was true. Nobody re-ran the unit.
 
 Note `--lie-from`: **a liar has to lie twice.** The wrong answer starts the dispute; corrupting
-the roots afterwards is what makes it convictable. A party that returns a wrong answer and then
-replays honestly agrees with everybody — the replay is deterministic — so it is not caught by
-bisection at all. It is merely wrong, and the re-execution route names it. Both outcomes are
-correct; only one of them is cheap.
+the roots afterwards is what makes it convictable.
+
+## 5c · The other kind of wrong, which is more common
+
+Swap the liar for a broken engine — a wrong answer, replayed honestly:
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name broken --wrong-answer
+```
+
+```json
+{"state":"settled","by":"bisection","rounds":4,"messages":4,
+ "verdict":"nobody lied — both parties' replays agreed, and the trace they agreed on says
+            the second party reported the wrong answer (4 messages, nothing executed)"}
+```
+
+**Four messages, and nothing executed by anybody.** This party is not caught by bisection at all:
+its replay is deterministic, so it reproduces the truth and agrees with the honest party at every
+step. Nobody lied, so there is nobody to convict.
+
+It is caught by the trace they agreed on, because **the answer is part of the committed state**.
+One witness of the final state, checked against a root both parties had already committed to, and
+then two hash comparisons. Before that was true this case cost the coordinator a full interpreted
+re-execution — the most expensive path in the system, reached in the *ordinary* case rather than
+the adversarial one. See
+[ADR-0012](adr/0012-the-answer-is-part-of-the-committed-state.md).
 
 ## 6 · Just the browser worker, with no coordinator
 
@@ -257,7 +279,7 @@ small unit is not a measurement. **What this page demonstrates is agreement, not
 ## Checking the claims instead of believing them
 
 ```bash
-cargo test --workspace        # 271 tests
+cargo test --workspace        # 280 tests
 cargo bench                   # regenerates docs/benchmarks.md
 ```
 

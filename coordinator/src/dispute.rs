@@ -35,9 +35,14 @@
 //!
 //! A party whose original answer was merely *wrong* — a broken engine, a miscompiled build —
 //! replays honestly, agrees with the other party, and bisection reports
-//! [`DisputeError::NoDisagreement`]. Nobody is convicted, because nobody lied. Naming the wrong
-//! answer then falls to [`by_re_execution`], which costs a full interpreted run. Both outcomes
-//! are correct; the expensive one happens only when there is no liar to catch.
+//! [`DisputeError::NoDisagreement`]. Nobody is convicted, because nobody lied.
+//!
+//! That case used to cost a full interpreted re-execution. It no longer does. **The answer is
+//! part of the committed state**, so a trace the two parties agree on *determines* what the
+//! answer was: one witness at the final step, checked against a root both of them already
+//! committed to, names the wrong result by comparing two digests. See
+//! [ADR-0012](../../docs/adr/0012-the-answer-is-part-of-the-committed-state.md) and
+//! [`settle_by_agreed_answer`].
 
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
@@ -228,6 +233,19 @@ pub enum Conclusion {
         /// Messages exchanged.
         rounds: u32,
     },
+    /// The parties' replays agreed at every step, so nobody lied — and the trace they agreed
+    /// on named the answer.
+    ///
+    /// The cheap resolution of the non-adversarial case. Settled by comparing digests against a
+    /// root both parties committed to, with **nothing executed by anybody**.
+    AgreedOnTrace {
+        /// Whose submitted result contradicted the trace they both agreed on. `None` means
+        /// neither matched, which takes two parties agreeing on a trace and both misreporting
+        /// its answer.
+        wrong: Option<Party>,
+        /// Messages exchanged reaching that agreement.
+        rounds: u32,
+    },
     /// The interactive protocol could not decide it, so re-execution did.
     ///
     /// The ordinary case is [`DisputeError::NoDisagreement`]: the parties' replays agree, so
@@ -247,7 +265,8 @@ impl Conclusion {
         match self {
             Self::Convicted { rounds, .. }
             | Self::Abandoned { rounds, .. }
-            | Self::BothWrong { rounds, .. } => *rounds,
+            | Self::BothWrong { rounds, .. }
+            | Self::AgreedOnTrace { rounds, .. } => *rounds,
             Self::FellBack { .. } => 0,
         }
     }
@@ -377,6 +396,12 @@ fn preside(
 
     let verdict = match dispute::resolve(&mut first, &mut second, Step::new(length)) {
         Ok(verdict) => verdict,
+        // The parties agree at every step. Nobody lied, so there is nobody to convict — but
+        // the trace they agree on says what the answer was, because the answer is committed.
+        Err(DisputeError::NoDisagreement) => {
+            return settle_by_agreed_answer(dispute, &image, length, patience)
+                .unwrap_or_else(|| fallback("the parties agree, and no usable witness of the agreed final state was supplied".to_owned()));
+        }
         Err(DisputeError::Abandoned { by, rounds, .. }) => {
             // A definite outcome of the interactive protocol, not a failure of it. The party
             // still answering is believed, which is what "loses by default" means.
@@ -480,6 +505,81 @@ fn collect_witness(
         }
     }
     None
+}
+
+/// Settle a dispute the parties agree about, without executing anything.
+///
+/// # Why this is possible at all
+///
+/// Reaching here means bisection found no disagreement: both parties replayed honestly and
+/// committed to the same root at every step. Under a deterministic replay that is the ordinary
+/// non-adversarial case — one of them returned a wrong *answer* without lying about the
+/// *execution*, which is what a broken engine or faulty memory produces.
+///
+/// The answer is part of the committed state
+/// ([ADR-0012](../../docs/adr/0012-the-answer-is-part-of-the-committed-state.md)), so the root
+/// the parties already agreed on at the final step **determines** what the answer was. One
+/// party supplies the final state as a witness, the witness is checked against that root the
+/// same way any other witness is, and then it is two hash comparisons.
+///
+/// **The coordinator executes nothing.** Not the unit, and — unlike a conviction — not even one
+/// instruction. Before the answer was committed this case cost a full interpreted re-execution,
+/// which is the most expensive path the system had.
+///
+/// `None` if the agreed root cannot be established or no party supplies a matching witness, in
+/// which case the caller falls back.
+fn settle_by_agreed_answer(
+    dispute: &Dispute,
+    image: &image::Image<'_>,
+    length: u64,
+    patience: Duration,
+) -> Option<(Conclusion, Option<Vec<u8>>)> {
+    // Taken from the transcript rather than asked for again. `resolve` already put this question
+    // to both parties and got the same answer twice; asking a third time would charge a party
+    // another full replay to learn something already written down.
+    let (agreed, rounds) = {
+        let log = dispute.log();
+        let root = log
+            .transcript
+            .iter()
+            .find(|u| u.step == length)
+            .and_then(|u| u.root)?;
+        (
+            root,
+            u32::try_from(log.transcript.len()).unwrap_or(u32::MAX),
+        )
+    };
+
+    let witness = collect_witness(dispute, Step::new(length), patience)?;
+    // The same check that makes any witness trustworthy: it must reconstruct the root the
+    // parties committed to. A party that fabricates a final state to make its own answer look
+    // right fails here.
+    if witness.commitment().root() != agreed {
+        return None;
+    }
+    // The image is unused for this decision and is taken to keep the signature honest about
+    // what a caller must have: a coordinator that could not decode the module could not have
+    // opened the dispute.
+    let _ = image;
+
+    let matches = |output: Option<&Vec<u8>>| {
+        output.is_some_and(|o| cairn_runtime::state::hash_output(o) == witness.output)
+    };
+    let first_ok = matches(dispute.outputs.first());
+    let second_ok = matches(dispute.outputs.get(1));
+
+    let (wrong, output) = match (first_ok, second_ok) {
+        (true, false) => (Some(Party::Second), dispute.outputs.first().cloned()),
+        (false, true) => (Some(Party::First), dispute.outputs.get(1).cloned()),
+        // Both parties agreed on a trace and both misreported what it answered. Nobody's result
+        // is accepted; the unit goes back to the queue.
+        (false, false) => (None, None),
+        // Unreachable: they were routed here because their outputs differ, so they cannot both
+        // hash to the same digest.
+        (true, true) => return None,
+    };
+
+    Some((Conclusion::AgreedOnTrace { wrong, rounds }, output))
 }
 
 /// Settle a disagreement by executing the unit once, here.
