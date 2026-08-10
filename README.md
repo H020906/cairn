@@ -99,7 +99,7 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
 | Claim | Status |
 |---|---|
-| Arbitration cost is independent of execution length | **Confirmed.** 21k steps → 15 rounds; 2.1M steps → 21 rounds |
+| Arbitration cost is independent of execution length | **Confirmed.** 21k steps → 15 rounds; 2.1M steps → 21 rounds. Every divergence point of every length up to 512 checked exhaustively, and the documented `⌈log₂ n⌉` turns out to be a **band** — `⌈log₂ n⌉ - 1` to `⌈log₂ n⌉`, upper end attained |
 | A witness is small | **Confirmed, with a caveat now pinned by a test.** One 64 KiB page for ordinary instructions; a `memory.fill` reaches as far as its length says, and 100,000 bytes touches two |
 | Metering does not change what a program computes | **Confirmed.** Every differential case, both engines, identical output and trapping |
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
@@ -235,7 +235,7 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-222 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+237 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
 checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
 randomly generated float expressions and 200 whole generated modules per run, a bisection game
 that converges on a corrupted instruction, and an adjudication that names the liar without
@@ -254,7 +254,7 @@ repository. That is stated plainly rather than left implied by unticked boxes.
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~11.2k lines of Rust, 222 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~11.2k lines of Rust, 237 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
@@ -276,11 +276,15 @@ The project is explicitly built to be picked up by people who did not write it.
   works, what does not, the eight invariants that must not be broken, and what to do with
   your first hour, day and week.
 - **[docs/GOOD_FIRST_ISSUES.md](docs/GOOD_FIRST_ISSUES.md)** — specified pieces of real work,
-  sized, each with where to start and how you know you are done. Five are open; the six that
-  are closed are kept with what they actually taught, because four of them turned out
-  differently from how they were written.
+  sized, each with where to start and how you know you are done. **All of them are now
+  closed** — the page has become the record of what each one taught, which is worth more than
+  the tickets were: four turned out differently from how they were written, one exactly
+  backwards, and one had already been done before it was written down.
+- **[docs/WALKTHROUGH.md](docs/WALKTHROUGH.md)** — five commands in twenty minutes with their
+  real output, ending in a reading order. If you are handing this project to someone, hand
+  them that.
 - **[docs/WORKLOADS.md](docs/WORKLOADS.md)** — how to write a program Cairn can run: the whole
-  interface, a working example, and a determinism reason for every refusal.
+  interface, working examples in WAT and Rust, and a determinism reason for every refusal.
 - **[ARCHITECTURE.md](ARCHITECTURE.md)** — how the pieces fit, and why determinism is a hard
   requirement rather than a nice property.
 - **[CONTRIBUTING.md](CONTRIBUTING.md)** — setup, tests, and the one rule that is not

@@ -246,9 +246,15 @@ fn integer_workloads_pay_nothing_for_float_determinism() {
 
 /// Bisection rounds against execution length — the claim ADR-0001 actually rests on.
 ///
-/// The coordinator's work must not grow with the disputed execution. Rounds are `log₂` of the
-/// length and nothing else, so a hundredfold longer execution costs about seven more rounds.
-/// These are exact: bisection is deterministic and so is the divergence point.
+/// The coordinator's work must not grow with the disputed execution: a hundredfold longer one
+/// costs about seven more rounds. These are exact, because bisection is deterministic and so is
+/// the divergence point.
+///
+/// **Not `⌈log₂ n⌉` exactly, and the third row is why.** 190,028 steps settle in 17 rounds where
+/// `⌈log₂⌉` is 18 — a round either raises the floor (halving, rounding up) or lowers the ceiling
+/// (rounding down), so where the divergence falls decides whether the last round is needed. The
+/// real statement is `⌈log₂ n⌉ - 1 ≤ rounds ≤ ⌈log₂ n⌉`, and `tests/bisection.rs` walks every
+/// divergence point of every length up to 512 to hold both ends of it.
 #[test]
 fn arbitration_does_not_grow_with_execution_length() {
     let workload = |iterations: u32| {
@@ -272,9 +278,8 @@ fn arbitration_does_not_grow_with_execution_length() {
         )
     };
 
-    // (iterations, execution length, bisection rounds)
     // (iterations, execution length, bisection rounds). A hundredfold more instructions costs
-    // six more rounds, which is log₂ and nothing else.
+    // six more rounds — log₂ of the ratio, and nothing to do with the absolute length.
     for (iterations, expected_length, expected_rounds) in [
         (100u32, 1_928u64, 11u32),
         (1_000, 19_028, 15),

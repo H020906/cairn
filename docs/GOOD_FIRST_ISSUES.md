@@ -1,13 +1,31 @@
 # Where to start
 
-Nine pieces of real work, sized and specified. Nothing here is busywork invented to look
-welcoming — each one either closes a gap I know exists or attacks a claim I know is shaky.
+**Every issue on this page is closed.** That is not a claim that the project is finished — it
+is much less than half built — but the specified, sized, self-contained work is done, and
+pretending otherwise by leaving stale tickets open would be worse than saying so.
 
-Read [MAINTAINER.md](MAINTAINER.md) §5 first. Every task below sits inside those invariants.
+**What this page is for now** is the record of what each one actually taught, which is the part
+that does not survive in a commit log. Four of the nine turned out differently from how they
+were written, one of them exactly backwards:
 
-**Sizes:** **S** = an afternoon · **M** = a few days · **L** = a week or more.
-If you find one of these is already done, that is a documentation bug and fixing it is a
-perfectly good first PR.
+| | |
+|---|---|
+| **[6b](#6b--make-metering-cheap--done-and-it-does-not-do-what-this-issue-wanted--closed)** | asked for a change that would make disputes cheaper. Measured, it makes them **dearer** — and buys something else nobody had asked for. |
+| **[8](#8--dont-canonicalize-nans-that-cannot-happen--done-differently--closed)** | asked for a dataflow analysis. The problem dissolved instead: canonicalize at the four *escapes*, and the analysis is unnecessary. |
+| **[7](#7--property-test-the-bisection-game--done-and-better-than-proposed--closed)** | asked for `proptest`. Exhaustive enumeration is strictly stronger and needed no dependency — and it showed the documented `⌈log₂ n⌉` is a band, not a number. |
+| **[1](#1--fuzz-the-admission-gate--done-and-it-found-nothing--closed)** | found **nothing** across 12 million inputs, which is reported as the negative result it is. |
+| **[5](#5--check-that-runtime-still-compiles-for-wasm32--already-done-and-this-entry-was-stale--closed)** | had already been done before it was written down. |
+
+**If you want to work on Cairn, the work is now the unbuilt half**, and it is large rather than
+specified: the coordinator, the schema, the verification policy, the dashboard, a real
+scientific workload. [MAINTAINER.md](MAINTAINER.md) §3 says what exists and what does not, §5
+the invariants any of it must sit inside. Open an issue saying which you want and it is yours.
+
+Two smaller things are genuinely still open and are noted where they belong: **coverage-guided
+fuzzing** with `cargo fuzz` (issue 1), and **comparing generated modules under the honest-path
+config** as well as full instrumentation (issue 6).
+
+**Sizes below:** **S** = an afternoon · **M** = a few days · **L** = a week or more.
 
 ---
 
@@ -88,7 +106,7 @@ verdict, and README links to it.
 
 ---
 
-### 3 · ~~Write the workload author's guide~~ — **done** · `closed`
+### 3 · ~~Write the workload author's guide~~ — **done, both halves** · `closed`
 
 > [`docs/WORKLOADS.md`](WORKLOADS.md). The interface, a complete working unit, the six admitted
 > proposals, and — the half the original issue asked for and is easiest to skip — **a reason
@@ -105,6 +123,19 @@ verdict, and README links to it.
 > expensive shape, and the committed example does that deliberately. And **`wasm32-wasi` will
 > not work** — it emits imports from `wasi_snapshot_preview1` — which is the first wall a real
 > author hits.
+>
+> **And the compiled example, which is where the page turned out to be wrong.**
+> `workloads/examples/rust/` is a real Rust work unit that CI builds and puts through the
+> admission gate on every push. It answers `bd3e5cfce4250000` — the same eight bytes as the
+> hand-written WAT, from different source in a different language.
+>
+> The guide's link flags, written from memory, did not link. Rust's `wasm32` target lays a
+> **1 MiB shadow stack out first**, so any `--max-memory` below about 1 MiB fails with
+> `rust-lld: error: initial memory too small` — an error that never mentions stacks and that
+> nobody would guess from the page. `-zstack-size=65536` is the missing flag.
+>
+> That is the argument for compiling an example rather than describing one: **the section most
+> likely to be wrong was wrong, and only a build could say so.**
 
 <details><summary>Original issue</summary>
 
@@ -129,12 +160,6 @@ contract. It is small and deserves one page:
 to a module the validator admits, and the rejection reasons are explained rather than listed.
 
 </details>
-
-> **Still open, and it is the half that needed a toolchain:** the guide explains how to target
-> `wasm32-unknown-unknown` from C or Rust and what link flags to pass, but **no compiled
-> example is committed** — the committed workload is hand-written WAT. Someone with a C or
-> Rust wasm toolchain should add one under `workloads/examples/` and check the flags in that
-> section are right, because they are the part of the page most likely to be wrong.
 
 ---
 
@@ -175,16 +200,19 @@ one workload the error is 148%. What is missing is the CI gate on the exact coun
 
 ---
 
-### 5 · Check that `runtime/` still compiles for `wasm32` · **S** · `good-first-issue`
+### 5 · ~~Check that `runtime/` still compiles for `wasm32`~~ — **already done, and this entry was stale** · `closed`
 
-The browser worker will need this crate to build for `wasm32-unknown-unknown`. Nothing
-currently stops a dependency from quietly breaking that, and the failure would be discovered
-at the worst possible time.
-
-**Start:** add `cargo check -p cairn-runtime --target wasm32-unknown-unknown` to
-`.github/workflows/ci.yml`.
-**Done when:** it is in CI and green — or it is *not* green, and the issue is reopened with
-what broke, which is more valuable.
+> CI has run `cargo build -p cairn-runtime --lib --target wasm32-unknown-unknown --release` on
+> every push since the scaffold, and `rust-toolchain.toml` installs the target. This issue was
+> describing work that already existed.
+>
+> Which is exactly the case the header of this page warns about — *"if you find one of these is
+> already done, that is a documentation bug"* — and it went unnoticed for eight commits, so the
+> warning was not idle.
+>
+> The reason it needs `--lib` is worth keeping: `--workspace` would pull in the reference
+> engines, and **wasmtime compiles WebAssembly to native code, so it will not itself compile
+> *to* WebAssembly.** Only the library has to.
 
 ---
 
@@ -335,17 +363,34 @@ unchanged, and a test pins that the answers are identical with and without check
 
 ---
 
-### 7 · Property-test the bisection game · **M** · `help-wanted`
+### 7 · ~~Property-test the bisection game~~ — **done, and better than proposed** · `closed`
 
-`Challenge` is a pure state machine, which makes it unusually easy to test properly. For any
-execution length `n` and any divergence point `d < n`, the protocol must converge on exactly
-`d`, in `⌈log₂ n⌉` rounds, from either party's perspective, with no reachable state where
-both parties are simultaneously stuck.
-
-**Start:** `proptest` over `(n, d)` and over the sequence of party responses, including a
-party that goes silent mid-game.
-**Done when:** convergence, round count, and the absent-party default are properties rather
-than examples.
+> `runtime/tests/bisection.rs`. The issue suggested `proptest`; **exhaustive enumeration is
+> strictly stronger and needed no dependency.** `Challenge` is four integers, so every length
+> from 1 to 512 and *every* divergence point within each — about 131,000 complete games — runs
+> in under a second, with 20,000 sampled games at lengths up to 2^63 for the arithmetic that
+> only matters near the top of the range.
+>
+> **Checked for teeth before being trusted.** Adding `+ 1` to the midpoint makes 6 of the 10
+> tests fail, and the message names the violated invariant: *asked about step 2, outside its
+> own bracket [step 0, step 2]*.
+>
+> Two things it turned up:
+>
+> **The round count is a band, not a number.** Every document here says `⌈log₂ n⌉`, which is
+> right as a *worst case over divergence points* but is not the count for every one — a round
+> either raises the floor (halving, rounding up) or lowers the ceiling (rounding down), so
+> where `d` falls decides whether the last round is needed. The real statement is
+> `⌈log₂ n⌉ - 1 ≤ rounds ≤ ⌈log₂ n⌉`, and the test asserts **both** ends plus that the upper
+> one is actually attained — a test pinning only the upper bound would pass on a state machine
+> that had silently stopped halving. (`exact_costs.rs` already recorded a case in the lower
+> half, 190,028 steps in 17 rounds against `⌈log₂⌉ = 18`, which nobody had noticed was
+> informative.)
+>
+> **The first party is asked exactly one more question than the second**, because the agreed
+> root is taken from it alone — sound, since the lower bound only ever moves to a step where
+> both answered identically. A refactor "fixing" the asymmetry would cost a round-trip and buy
+> nothing, so it is pinned with the reasoning attached.
 
 ---
 
@@ -456,3 +501,9 @@ The coordinator, the database schema, the dashboard, and the science workload ar
 well-specified in [ARCHITECTURE.md](../ARCHITECTURE.md), and they are ordinary engineering.
 If you want one, take it — open an issue and say so, and it is yours. They are absent here
 only because "write a distributed job coordinator" is not a first issue.
+
+That order was deliberate and is worth stating once: **the hard, novel, falsifiable part was
+built first**, so that if the window closed early what survived would be the thing nobody else
+has rather than a job queue anyone could write. The consequence is the shape you are looking at
+— a verification kernel that has been measured, doubted and corrected in public, attached to a
+system that does not exist yet.

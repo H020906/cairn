@@ -1,0 +1,25 @@
+# Deliberately outside the repository's workspace. A workload is a program somebody *submits*
+# to Cairn, not a part of it: it targets wasm32, it must not inherit the workspace's lints or
+# profiles, and `cargo test --workspace` has no business building it.
+[workspace]
+
+[package]
+name = "cairn-workload-example"
+description = "A Cairn work unit written in Rust, to prove the toolchain instructions in docs/WORKLOADS.md are right"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# A dynamic library is what produces a bare `.wasm` module rather than an executable expecting
+# a `_start`. Cairn units have no start: all execution happens under `cairn_run`.
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+# Nothing here is about speed. `opt-level = "s"` and no panic machinery keep the module small
+# and, more importantly, keep the compiler from emitting anything outside the admitted feature
+# set — autovectorisation is the usual way a workload accidentally acquires SIMD.
+opt-level = "s"
+lto = true
+panic = "abort"

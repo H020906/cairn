@@ -1,0 +1,25 @@
+# The link flags a Cairn workload needs, in the one place a reader will look for them.
+#
+# `--max-memory` is not optional. Cairn refuses a module whose memory declares no maximum,
+# because memory growth that fails at different points on different machines is a
+# disagreement — and no toolchain emits a maximum unless told to.
+#
+# **`-z stack-size` is the one that surprises people.** Rust's wasm32 target defaults to a
+# 1 MiB shadow stack and lays it out *first*, so `--max-memory` below about 1 MiB fails to link
+# with `initial memory too small` — a message that says nothing about stacks. A Cairn unit is
+# straight-line numerical work with no deep recursion, so 64 KiB is generous; the interpreter
+# bounds call depth explicitly anyway, which is what makes recursion fail identically on every
+# machine rather than wherever the host's native stack happened to run out.
+#
+# Two pages total: one for the stack, one for everything else. Raise all three together for a
+# workload that actually needs memory.
+
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=-zstack-size=65536",
+  "-C", "link-arg=--initial-memory=131072",
+  "-C", "link-arg=--max-memory=131072",
+]

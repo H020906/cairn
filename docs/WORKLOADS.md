@@ -97,13 +97,37 @@ cargo run -p cairn-worker -- run workloads/examples/sum-of-squares.wat workloads
 ### From C or Rust
 
 Any toolchain that emits a `wasm32` module works, provided the output uses nothing outside the
-feature set below. Two things trip people up:
+feature set below. There is a working Rust version of the unit above in
+[`workloads/examples/rust/`](../workloads/examples/rust) — **CI builds it and puts it through
+the admission gate on every push**, so if a compiler release starts emitting something Cairn
+refuses, that is a red build rather than a surprise for you.
+
+```bash
+cargo build --release --manifest-path workloads/examples/rust/Cargo.toml
+cargo run -p cairn-worker -- run \
+  workloads/examples/rust/target/wasm32-unknown-unknown/release/cairn_workload_example.wasm \
+  workloads/examples/input-a.bin
+```
+
+It answers `bd3e5cfce4250000` — the same eight bytes the hand-written WAT produces, which is
+what "the unit is the module, not the source" means in practice.
+
+Three things trip people up, and the third is the one nobody guesses:
 
 - **No WASI.** `wasm32-wasi` emits imports from `wasi_snapshot_preview1`, and the only
   importable module is `cairn`. Target `wasm32-unknown-unknown`, and in C use `-nostdlib`.
-- **Declare the memory maximum.** Most toolchains omit it. In Rust, pass
-  `-C link-arg=--max-memory=1048576`; in C, `-Wl,--max-memory=1048576`. Without it the module
-  is refused, and the reason is on this page rather than in the error.
+- **Declare the memory maximum.** No toolchain emits one by default. In Rust, pass
+  `-C link-arg=--max-memory=N`; in C, `-Wl,--max-memory=N`. Without it the module is refused.
+- **Shrink the shadow stack, or the link fails for a reason it does not name.** Rust's wasm32
+  target defaults to a **1 MiB** shadow stack laid out *first*, so any `--max-memory` below
+  about 1 MiB fails with `rust-lld: error: initial memory too small` — a message that never
+  mentions stacks. Pass `-C link-arg=-zstack-size=65536` alongside it. A Cairn unit is
+  straight-line numerical work, and the interpreter bounds call depth explicitly in any case,
+  which is what makes deep recursion fail identically everywhere rather than wherever the
+  host's native stack ran out.
+
+The whole flag set is in [`workloads/examples/rust/.cargo/config.toml`](../workloads/examples/rust/.cargo/config.toml),
+which is three lines and is the thing to copy.
 
 The instrumentation pass drops custom sections, so the name section goes with them and stack
 traces lose their symbols. That is deliberate: two builds of the same workload must produce the
