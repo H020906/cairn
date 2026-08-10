@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cairn 演示 · 看着它抓出一个说谎者</title>
+<style>
+  :root {
+    --bg: #0f1115;
+    --panel: #171a21;
+    --line: #262b36;
+    --ink: #e6e9ef;
+    --dim: #8b93a5;
+    --good: #4ade80;
+    --bad: #f87171;
+    --warn: #fbbf24;
+    --accent: #60a5fa;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 32px 20px 80px;
+    background: var(--bg); color: var(--ink);
+    font: 15px/1.75 system-ui, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 6px; letter-spacing: .5px; }
+  .sub { color: var(--dim); margin: 0 0 28px; }
+  .panel {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 20px 22px; margin-bottom: 20px;
+  }
+  h2 { font-size: 16px; margin: 0 0 14px; color: var(--dim); font-weight: 600; }
+
+  /* the number that is the whole point */
+  .headline { display: flex; align-items: baseline; gap: 18px; flex-wrap: wrap; }
+  .huge {
+    font-size: 68px; font-weight: 700; line-height: 1;
+    font-variant-numeric: tabular-nums;
+    transition: color .3s;
+  }
+  .huge.zero { color: var(--good); }
+  .huge.one  { color: var(--warn); }
+  .headline .label { color: var(--dim); font-size: 14px; max-width: 420px; }
+
+  /* units */
+  .units { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 12px; }
+  .unit { border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; }
+  .unit .id { color: var(--dim); font-size: 13px; }
+  .unit .state { font-weight: 600; margin-top: 4px; }
+  .unit .detail { color: var(--dim); font-size: 13px; margin-top: 6px; word-break: break-all; }
+  .s-open     { color: var(--dim); }
+  .s-accepted { color: var(--good); }
+  .s-arguing  { color: var(--warn); }
+  .s-settled  { color: var(--accent); }
+
+  /* the narrowing bracket */
+  .track {
+    position: relative; height: 34px; margin: 6px 0 4px;
+    background: #10131a; border: 1px solid var(--line); border-radius: 6px; overflow: hidden;
+  }
+  .range {
+    position: absolute; top: 0; bottom: 0;
+    background: linear-gradient(180deg, rgba(251,191,36,.32), rgba(251,191,36,.14));
+    border-left: 2px solid var(--warn); border-right: 2px solid var(--warn);
+    transition: left .45s cubic-bezier(.4,0,.2,1), width .45s cubic-bezier(.4,0,.2,1);
+  }
+  .culprit {
+    position: absolute; top: 0; bottom: 0; width: 3px; background: var(--bad);
+    box-shadow: 0 0 12px var(--bad);
+  }
+  .ticks { display: flex; justify-content: space-between; color: var(--dim); font-size: 12px; }
+  .bracket { font-variant-numeric: tabular-nums; color: var(--warn); font-size: 13px; margin-top: 6px; }
+
+  /* the conversation */
+  .log { max-height: 340px; overflow-y: auto; margin-top: 14px; }
+  .round { border-top: 1px solid var(--line); padding: 10px 0; }
+  .round:first-child { border-top: none; }
+  .ask { font-size: 14px; }
+  .ask b { color: var(--accent); font-variant-numeric: tabular-nums; }
+  .replies { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 6px; }
+  .reply { font-size: 12.5px; color: var(--dim); font-family: ui-monospace, Consolas, monospace; }
+  .reply span { color: var(--ink); }
+  .verdict-line { font-size: 13px; margin-top: 6px; }
+  .same { color: var(--good); }
+  .diff { color: var(--bad); }
+
+  .final { font-size: 17px; line-height: 1.9; }
+  .final .big { font-size: 22px; font-weight: 700; color: var(--bad); }
+  .note { color: var(--dim); font-size: 13px; border-left: 2px solid var(--line); padding-left: 14px; }
+  .note b { color: var(--ink); }
+  .idle { color: var(--dim); }
+  code { background: #0b0d12; padding: 2px 6px; border-radius: 4px; font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>Cairn 演示</h1>
+  <p class="sub">三个任务，两个志愿者，其中一个会说谎。看着它被抓出来。</p>
+
+  <div class="panel">
+    <h2>这在干嘛</h2>
+    <p style="margin:0 0 10px">
+      借陌生人的闲置电脑做计算，问题是<b>不能信他们</b>——有人乱填，更多的是内存坏了自己不知道。
+      老办法是<b>同一道题发给两三台电脑对答案</b>，管用，但捐来的算力有三分之一到一半花在重算上。
+    </p>
+    <p style="margin:0">
+      Cairn 的办法：<b>只算一次就接受</b>。万一两个人答案不一样，不重算，让这两个人自己吵——
+      裁判一轮轮问「你执行到第几步的时候是什么状态」，二十轮就能把一百万条指令缩到<b>一条</b>。
+      裁判只亲手执行那一条。
+    </p>
+  </div>
+
+  <div class="panel">
+    <div class="headline">
+      <div id="executed" class="huge zero">0</div>
+      <div class="label">
+        <b>裁判到目前为止亲自执行的指令数。</b><br>
+        这个数字就是整个项目的主张。盯着它——争议全程它都是 0，
+        最后只会变成 1。
+      </div>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>任务</h2>
+    <div id="units" class="units"><div class="idle">正在连接…</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>争议现场</h2>
+    <div id="dispute"><div class="idle">还没有争议。前两个任务两位志愿者算出了同样的答案，直接接受。</div></div>
+  </div>
+
+  <div class="panel">
+    <h2>关于这个演示，需要说清楚的</h2>
+    <p class="note" style="margin:0 0 12px">
+      <b>真的部分：</b>协调器是真的协调器，二分是真的二分，最后那一条指令是真的被执行了一遍，
+      状态见证是说谎者的对手真的交上来的。这个页面读的是 <code>/api/status</code> 和
+      <code>/api/disputes</code>——任何客户端看到的都是这些。
+    </p>
+    <p class="note" style="margin:0 0 12px">
+      <b>为演示而安排的部分：</b>
+      ① 每次回答前停了 0.7 秒，否则整场争议不到一秒就结束了——被拖慢的是<b>对话</b>，不是计算；
+      ② 抽查率调成了 100%，好让你两种结局都看到，真实网络里它是 10% 左右，
+      剩下 90% 的任务<b>只算一次就接受</b>，省下的算力就是从那儿来的；
+      ③ 所有人跑在一个进程里，真实的志愿者是一个浏览器标签页。
+    </p>
+    <p class="note" style="margin:0">
+      <b>说谎者是真的在说谎。</b>它先给了一个错答案，之后每一轮还要继续伪造自己的状态。
+      只撒一次谎不算作弊——重放是确定性的，如实回答问题的人会还原出真相，
+      那样他只是<b>算错了</b>，不是骗子。这两种情况的处理方式和代价都不一样。
+    </p>
+  </div>
+
+</div>
+
+<script>
+const STATE_TEXT = {
+  open:     ['等待中',     's-open'],
+  accepted: ['已接受',     's-accepted'],
+  arguing:  ['争议进行中', 's-arguing'],
+  settled:  ['已裁决',     's-settled'],
+  disputed: ['争议中',     's-arguing'],
+};
+
+const short = (hex) => hex ? hex.slice(0, 10) + '…' : '（我这时已经算完了）';
+const commas = (n) => n.toLocaleString('zh-CN');
+
+async function tick() {
+  let units = [], disputes = [];
+  try {
+    [units, disputes] = await Promise.all([
+      fetch('/api/status').then((r) => r.json()),
+      fetch('/api/disputes').then((r) => r.json()),
+    ]);
+  } catch (e) {
+    return; // the server is still starting, or has gone; the next tick will tell us
+  }
+
+  renderUnits(units);
+  renderDispute(disputes[0]);
+}
+
+function renderUnits(units) {
+  const box = document.getElementById('units');
+  if (!units.length) { box.innerHTML = '<div class="idle">还没有任务。</div>'; return; }
+
+  box.innerHTML = units.map((u) => {
+    const state = u.outcome.state;
+    const [text, cls] = STATE_TEXT[state] || [state, 's-open'];
+    let detail = '';
+    if (state === 'open') {
+      detail = `已收到 ${u.results} / ${u.quorum} 份答案`;
+    } else if (state === 'accepted') {
+      detail = `两位志愿者各自独立算出同一个答案：<br>${u.outcome.output}`;
+    } else if (state === 'arguing') {
+      detail = `两份答案不一样，正在让他们自己吵（已交换 ${u.outcome.messages} 条消息）`;
+    } else if (state === 'settled') {
+      detail = u.outcome.output ? `裁定的答案：<br>${u.outcome.output}` : '没有能采信的答案';
+    }
+    return `<div class="unit">
+      <div class="id">任务 ${u.unit}</div>
+      <div class="state ${cls}">${text}</div>
+      <div class="detail">${detail}</div>
+    </div>`;
+  }).join('');
+}
+
+/**
+ * Group the transcript into rounds.
+ *
+ * The referee asks one party at a time, so consecutive entries about the same step are the two
+ * halves of one question. Grouping by step rather than by pairs keeps this correct for the
+ * opening exchange and for the final single-sided question.
+ */
+function toRounds(transcript) {
+  const groups = [];
+  for (const u of transcript) {
+    const last = groups[groups.length - 1];
+    if (last && last.step === u.step && last.replies.length < 2) last.replies.push(u);
+    else groups.push({ step: u.step, replies: [u] });
+  }
+  return groups;
+}
+
+function renderDispute(d) {
+  const box = document.getElementById('dispute');
+  if (!d) {
+    box.innerHTML = '<div class="idle">还没有争议。两位志愿者到目前为止答案一致。</div>';
+    setExecuted(0);
+    return;
+  }
+
+  const rounds = toRounds(d.transcript);
+  const length = Math.max(...d.transcript.map((u) => u.step), 1);
+
+  // Replay the bisection exactly as the coordinator did: agreement raises the floor,
+  // disagreement lowers the ceiling.
+  const settled = d.kind && d.kind !== 'arguing';
+  let lo = 0, hi = length, seenEnds = 0, bisected = 0;
+  const lines = [];
+
+  for (const [i, r] of rounds.entries()) {
+    const [a, b] = r.replies;
+    const both = r.replies.length === 2;
+    const same = both && a.root === b.root;
+    const inFlight = !both && i === rounds.length - 1 && d.kind === undefined;
+
+    let verdict = '';
+    if (inFlight) {
+      verdict = '<span class="idle">等另一方回答…</span>';
+    } else if (!both) {
+      verdict = '<span class="idle">（裁判只问了一方，用来取双方都认可的那个状态）</span>';
+    } else if (r.step === 0) {
+      verdict = same
+        ? '<span class="same">✓ 一样 — 说明他们跑的是同一个任务，起点没问题</span>'
+        : '<span class="diff">✗ 起点就不一样 — 那他们根本没在算同一道题</span>';
+      seenEnds++;
+    } else if (seenEnds === 1) {
+      verdict = same
+        ? '<span class="same">✓ 终点也一样 — 没什么可吵的</span>'
+        : '<span class="diff">✗ 终点不一样 — <b>确实有分歧，开始二分</b></span>';
+      seenEnds++;
+    } else {
+      bisected += 1;
+      if (same) { lo = r.step; verdict = `<span class="same">✓ 一样 → 分歧在<b>后半段</b>，下界抬到 ${commas(r.step)}</span>`; }
+      else      { hi = r.step; verdict = `<span class="diff">✗ 不一样 → 分歧在<b>前半段</b>，上界压到 ${commas(r.step)}</span>`; }
+    }
+
+    lines.push(`<div class="round">
+      <div class="ask">裁判问：「你执行到第 <b>${commas(r.step)}</b> 步的时候，机器是什么状态？」</div>
+      <div class="replies">
+        <div class="reply">${d.parties[0]}：<span>${short(a && a.root)}</span></div>
+        <div class="reply">${d.parties[1]}：<span>${b ? short(b.root) : '—'}</span></div>
+      </div>
+      <div class="verdict-line">${verdict}</div>
+    </div>`);
+  }
+
+  const culpritAt = settled && d.divergence !== null ? d.divergence : null;
+  const left = (lo / length) * 100;
+  const width = Math.max(((hi - lo) / length) * 100, 0.35);
+
+  box.innerHTML = `
+    <div class="ticks"><span>第 0 步</span><span>共 ${commas(length)} 条指令</span></div>
+    <div class="track">
+      <div class="range" style="left:${left}%; width:${width}%"></div>
+      ${culpritAt !== null ? `<div class="culprit" style="left:${(culpritAt / length) * 100}%"></div>` : ''}
+    </div>
+    <div class="bracket">分歧还剩下的范围：第 ${commas(lo)} 步 – 第 ${commas(hi)} 步
+      （${commas(hi - lo)} 条指令，二分了 ${settled ? d.rounds : bisected} 轮）</div>
+    ${settled ? finalWords(d, length) : ''}
+    <div class="log">${lines.reverse().join('')}</div>`;
+
+  setExecuted(d.executed === 'one-instruction' ? 1
+            : d.executed === 'the-whole-unit' ? length : 0);
+}
+
+function finalWords(d, length) {
+  const liar = d.atFault !== null && d.atFault !== undefined ? d.parties[d.atFault] : null;
+  let body;
+  switch (d.kind) {
+    case 'convicted':
+      body = `二分把 <b>${commas(length)}</b> 条指令的分歧，用 <b>${d.rounds}</b> 轮问答
+              缩到了第 <b>${commas(d.divergence)}</b> 条。裁判亲手执行了<b>那一条</b>，
+              结果和 <span class="big">${liar}</span> 声称的不符。<br>
+              <b>没有任何人重算这个任务。</b>`;
+      break;
+    case 'agreed-on-trace':
+      body = `双方的重放<b>每一步都一致</b>——所以没人说谎。
+              但他们一致的那份执行过程，本身就写明了答案是什么，
+              而 <span class="big">${liar || '其中一方'}</span> 报上来的和它对不上。<br>
+              <b>裁判一条指令都没执行。</b>`;
+      break;
+    case 'abandoned':
+      body = `<span class="big">${liar}</span> 中途不回答了。不回答就按输处理——
+              但这和被证明说谎不是一回事，代价也该不一样。`;
+      break;
+    case 'both-wrong':
+      body = `第 ${commas(d.divergence)} 条指令上，<b>两个人说的都不对</b>。谁也不采信，任务重新排队。`;
+      break;
+    case 'fell-back':
+      body = `二分没能定下来，裁判只好<b>自己把整个任务跑了一遍</b>。这是最贵的一条路。`;
+      break;
+    default:
+      body = d.conclusion;
+  }
+  return `<div class="panel final" style="margin:16px 0 0; background:#10131a">${body}</div>`;
+}
+
+function setExecuted(n) {
+  const el = document.getElementById('executed');
+  if (el.textContent === commas(n)) return;
+  el.textContent = commas(n);
+  el.className = 'huge ' + (n === 0 ? 'zero' : 'one');
+}
+
+tick();
+setInterval(tick, 300);
+</script>
+</body>
+</html>

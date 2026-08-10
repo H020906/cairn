@@ -15,7 +15,7 @@
 //! GET  /api/challenge?worker=NAME what a party to a dispute is being asked  → or 204
 //! POST /api/challenge?worker=NAME&token=T        the answer, body depends on the question
 //! GET  /api/status                every unit and where it got to
-//! GET  /api/disputes              every argument, with its transcript
+//! GET  /api/disputes              every argument, its transcript, and a machine-readable verdict
 //! GET  /                          the browser worker, served from browser/
 //! ```
 //!
@@ -43,6 +43,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use tiny_http::{Header, Request, Response, Server};
+
+use cairn_runtime::dispute::Party;
 
 use crate::dispute::{Answer, Conclusion, Dispute, Question};
 use crate::grid::{Grid, Outcome, Submission};
@@ -399,13 +401,74 @@ fn render_dispute(index: usize, dispute: &Dispute) -> String {
     );
 
     format!(
-        r#"{{"dispute":{index},"unit":{},"parties":["{}","{}"],"messages":{},"conclusion":{conclusion},"transcript":[{}]}}"#,
+        r#"{{"dispute":{index},"unit":{},"parties":["{}","{}"],"messages":{},"conclusion":{conclusion},{},"transcript":[{}]}}"#,
         dispute.unit,
         escape(dispute.parties.first().map_or("", String::as_str)),
         escape(dispute.parties.get(1).map_or("", String::as_str)),
         log.transcript.len(),
+        verdict_fields(log.conclusion.as_ref()),
         transcript.join(",")
     )
+}
+
+/// The verdict as machine-readable fields, alongside the English prose.
+///
+/// # Why both
+///
+/// `conclusion` is a sentence, and a sentence is the wrong thing for a program to branch on —
+/// anything reading it has to match English substrings, which breaks the first time the wording
+/// improves. These fields say the same thing in a form a caller can act on, including one that
+/// renders the verdict in another language.
+///
+/// `executed` is the field worth having: it is what this whole project is about, and it says how
+/// much the **coordinator** ran to reach the verdict, which is `nothing` or `one-instruction`
+/// except on the re-execution route.
+fn verdict_fields(conclusion: Option<&Conclusion>) -> String {
+    let (kind, liar, divergence, executed) = match conclusion {
+        None => ("arguing", "null".to_owned(), "null".to_owned(), "nothing"),
+        Some(Conclusion::Convicted {
+            liar, divergence, ..
+        }) => (
+            "convicted",
+            party_index(*liar),
+            divergence.to_string(),
+            "one-instruction",
+        ),
+        Some(Conclusion::Abandoned { by, .. }) => {
+            ("abandoned", party_index(*by), "null".to_owned(), "nothing")
+        }
+        Some(Conclusion::BothWrong { divergence, .. }) => (
+            "both-wrong",
+            "null".to_owned(),
+            divergence.to_string(),
+            "one-instruction",
+        ),
+        Some(Conclusion::AgreedOnTrace { wrong, .. }) => (
+            "agreed-on-trace",
+            wrong.map_or_else(|| "null".to_owned(), party_index),
+            "null".to_owned(),
+            "nothing",
+        ),
+        Some(Conclusion::FellBack { .. }) => (
+            "fell-back",
+            "null".to_owned(),
+            "null".to_owned(),
+            "the-whole-unit",
+        ),
+    };
+
+    format!(
+        r#""kind":"{kind}","atFault":{liar},"divergence":{divergence},"rounds":{},"executed":"{executed}""#,
+        conclusion.map_or(0, Conclusion::rounds)
+    )
+}
+
+/// A party as an index into `parties`, so a caller need not parse "first party".
+fn party_index(party: Party) -> String {
+    match party {
+        Party::First => "0".to_owned(),
+        Party::Second => "1".to_owned(),
+    }
 }
 
 fn conclusion_words(conclusion: &Conclusion) -> String {
@@ -541,6 +604,15 @@ fn describe(grid: &Grid, outcome: &Outcome) -> String {
 }
 
 fn respond(request: Request, code: u16, content_type: &str, body: Vec<u8>) -> Result<(), String> {
+    // A worker names itself, and a name is a stranger's bytes: it reaches `/api/disputes` and
+    // `/api/status`, and it is routinely not ASCII. JSON is UTF-8 by specification, but a client
+    // told only `application/json` is entitled to guess — and some do, producing mojibake that
+    // looks like a bug in the coordinator.
+    let content_type = if content_type == "application/json" {
+        "application/json; charset=utf-8"
+    } else {
+        content_type
+    };
     let header = Header::from_bytes(&b"Content-Type"[..], content_type.as_bytes())
         .map_err(|()| "bad content type".to_owned())?;
     // The browser worker is served from the same origin, so CORS is not needed for it — but a

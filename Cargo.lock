@@ -101,6 +101,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-demo"
+version = "0.1.0"
+dependencies = [
+ "cairn-coordinator",
+ "cairn-runtime",
+]
+
+[[package]]
 name = "cairn-runtime"
 version = "0.1.0"
 dependencies = [

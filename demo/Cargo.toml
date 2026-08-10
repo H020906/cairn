@@ -1,0 +1,20 @@
+[package]
+name = "cairn-demo"
+description = "Runs a whole Cairn grid in one process, slowly enough to watch"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# The real coordinator, not a mock of one. The page watches the same `/api/status` and
+# `/api/disputes` a real deployment serves.
+cairn-coordinator = { path = "../coordinator" }
+# The volunteers here answer challenges with `dispute::answer`, which is the same function the
+# native worker calls. There is exactly one implementation of what an honest answer is.
+cairn-runtime = { path = "../runtime" }
+
+[lints]
+workspace = true

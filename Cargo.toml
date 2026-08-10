@@ -4,6 +4,7 @@ members = [
     "runtime",
     "worker-native",
     "coordinator",
+    "demo",
 ]
 
 [workspace.package]
