@@ -74,9 +74,11 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
   [ADR-0010](adr/0010-the-referee-executes-so-the-coordinator-is-rust.md) explains why the
   coordinator that does exist is Rust: **the referee executes**, so a Java one would need JNI, a
   subprocess, or a second implementation of consensus-critical code.
-- **No database.** No schema, no migrations. `docker-compose.yml` will start PostgreSQL and
-  Redis for you and nothing will connect to them. The coordinator's state is in memory and dies
-  with the process.
+- **No database, and after [ADR-0014](adr/0014-the-coordinator-keeps-a-log-not-a-database.md)
+  there is not going to be one.** `docker-compose.yml` will start PostgreSQL and Redis for you
+  and nothing will connect to them. State is in memory and is rebuilt from an append-only journal
+  — `--journal FILE` — which survives killing the process. What is genuinely still missing is a
+  store **more than one coordinator can share**, and compaction: the log only grows.
 - **No dashboard.** `web/` does not exist. `GET /api/status` is what there is.
 - **The coordinator exists but is not the one ARCHITECTURE originally described.**
   `coordinator/` has registration, a work queue, expiring leases, one-volunteer-one-vote, a

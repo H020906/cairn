@@ -11,11 +11,19 @@
 //!
 //! # What this is not
 //!
-//! **There is no database.** State is in memory and dies with the process. That is honest
-//! rather than temporary: persistence, transactions and crash recovery are the reason
-//! [ADR-0002](../../docs/adr/0002-language-boundaries.md) wanted Spring in the first place,
-//! and [ADR-0010](../../docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md)
-//! explains why that is a documented future rather than a documented plan.
+//! **There is no database, and after [ADR-0014] there is not going to be one.** State is in
+//! memory; what makes it survive a restart is an append-only journal in [`crate::journal`],
+//! replayed through [`Grid::restore`]. Every read in this file is a linear scan of a `Vec`, so
+//! there is nothing here for a query engine to do — persistence is how the memory is rebuilt,
+//! not where the data lives.
+//!
+//! Two things are still absent and they are the reason
+//! [ADR-0002](../../docs/adr/0002-language-boundaries.md) wanted Spring: **transactions across
+//! more than one writer**, which a single-process coordinator does not have, and **a store more
+//! than one coordinator can share**, which is what a real deployment would need. See
+//! [ADR-0010](../../docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md).
+//!
+//! [ADR-0014]: ../../docs/adr/0014-the-coordinator-keeps-a-log-not-a-database.md
 //!
 //! **There is no reputation and there are no canaries.** ADR-0001's cost model assumes both —
 //! a canary rate `c` and a replication rate `r` — and only `r` exists here. Reputation is what
@@ -35,6 +43,7 @@ use cairn_runtime::engine::image;
 use cairn_runtime::validate;
 
 use crate::dispute::{self, Dispute};
+use crate::journal::Entry;
 
 /// A work unit's identity: the BLAKE3 hash of the canonical module bytes.
 ///
@@ -90,7 +99,15 @@ pub struct Unit {
     pub results: Vec<Submission>,
     /// How many agreeing results this unit needs.
     pub quorum: usize,
-    /// Outstanding leases: worker, and when the lease expires.
+    /// Who has been given this unit, and until when.
+    ///
+    /// **Expired entries are kept**, and that is the point rather than an oversight. A lease is
+    /// two things at once: a *reservation*, which [`Grid::lease`] reads by expiry, and the
+    /// *evidence* that a worker was assigned this unit, which [`Grid::submit_result`] reads by
+    /// membership. Deleting an expired lease would throw away the second along with the first,
+    /// and the volunteer that comes back with a good answer a moment late — or after a restart,
+    /// where every restored lease is expired by construction — would be told it was never given
+    /// the work. So expiry is applied where it is read.
     leases: Vec<(String, Instant)>,
     /// Where this unit has got to.
     pub outcome: Outcome,
@@ -317,6 +334,158 @@ impl Grid {
         Ok(self.units.len() - 1)
     }
 
+    /// Rebuild a grid from what the journal recorded.
+    ///
+    /// # Why this replays facts rather than re-making decisions
+    ///
+    /// The obvious implementation puts every entry back through `register`, `submit` and
+    /// `submit_result`, so that a restored grid is provably reachable by ordinary operation.
+    /// That is the wrong shape here, and the reason is specific rather than aesthetic:
+    /// `submit_result` on the second disagreeing result **opens a live dispute** — it spawns a
+    /// referee thread and starts a patience timer against two volunteers who are not connected
+    /// yet. Replay would therefore start a fresh argument for every dispute the coordinator ever
+    /// had, and lose all of them by timeout, **convicting honest volunteers on startup**.
+    ///
+    /// So results are recorded rather than judged. The decision was already made once, by the
+    /// coordinator that wrote the entry; making it again is not verification, it is a second
+    /// chance to get it wrong. Registration is the exception and goes back through the live
+    /// path, because re-instrumenting is how a change to the instrumentation pass surfaces as an
+    /// id that no longer matches instead of as a grid quietly serving different bytes.
+    ///
+    /// # What a restart does to an argument
+    ///
+    /// Voids it. A unit that was in a dispute comes back **`Open` with its results discarded**,
+    /// and both parties are eligible for it again. Resuming is not possible — a dispute is a
+    /// live protocol with a blocking referee, two mailboxes and two volunteers mid-replay — and
+    /// the alternative, timing out whichever party did not come back, would convict a volunteer
+    /// for the coordinator's crash. See [`crate::journal`].
+    ///
+    /// # Errors
+    ///
+    /// A journal that names a workload or unit that does not exist, or a workload that no longer
+    /// registers. All of those mean the file does not describe this build, and coming up with a
+    /// grid that is *nearly* the one that died is worse than refusing.
+    pub fn restore(&mut self, entries: &[Entry]) -> Result<Restored, String> {
+        let mut restored = Restored::default();
+        // One reading of the clock for the whole replay. Every lease is restored already expired,
+        // so this is a point in the past by the time anybody asks — which is the intent.
+        let now = Instant::now();
+
+        for (index, entry) in entries.iter().enumerate() {
+            let at = || format!("journal entry {index}");
+            match entry {
+                Entry::Registered { name, source } => {
+                    self.register(name, source)
+                        .map_err(|e| format!("{}: {name} no longer registers: {e}", at()))?;
+                    restored.workloads += 1;
+                }
+
+                Entry::Queued {
+                    workload,
+                    input,
+                    quorum,
+                } => {
+                    if !self.workloads.contains_key(workload) {
+                        return Err(format!("{}: no workload {workload}", at()));
+                    }
+                    self.units.push(Unit {
+                        workload: workload.clone(),
+                        input: input.clone(),
+                        results: Vec::new(),
+                        // Recorded, not recomputed. Restarting with a different `--replicate`
+                        // must not change the quorum of a unit volunteers are already working on.
+                        quorum: *quorum,
+                        leases: Vec::new(),
+                        outcome: Outcome::Open,
+                    });
+                    restored.units += 1;
+                }
+
+                Entry::Leased { unit, worker } => {
+                    let held = self
+                        .units
+                        .get_mut(*unit)
+                        .ok_or_else(|| format!("{}: no unit {unit}", at()))?;
+                    held.leases.retain(|(who, _)| who != worker);
+                    // **Expired on arrival, deliberately.** A lease is evidence that this worker
+                    // was given this unit, which `submit_result` checks by membership, and a
+                    // reservation against other workers, which `lease` checks by expiry.
+                    // Restoring only the evidence lets the volunteer that was mid-unit return
+                    // its answer, while the unit stays available to everybody else — a
+                    // reservation for a volunteer that may never come back would delay the unit
+                    // by a lease timeout to protect work that is probably gone.
+                    held.leases.push((worker.clone(), now));
+                    restored.leases += 1;
+                }
+
+                Entry::Answered {
+                    unit,
+                    worker,
+                    output,
+                    fuel,
+                    bisects,
+                } => {
+                    let held = self
+                        .units
+                        .get_mut(*unit)
+                        .ok_or_else(|| format!("{}: no unit {unit}", at()))?;
+                    // Mirrors `submit_result`: answering consumes the lease. Without this a
+                    // restored grid would carry a lease for every unit ever handed out.
+                    held.leases.retain(|(who, _)| who != worker);
+                    held.results.push(Submission {
+                        worker: worker.clone(),
+                        output: output.clone(),
+                        fuel: *fuel,
+                        bisects: *bisects,
+                    });
+                    restored.results += 1;
+                }
+
+                Entry::Accepted { unit, output } => {
+                    self.units
+                        .get_mut(*unit)
+                        .ok_or_else(|| format!("{}: no unit {unit}", at()))?
+                        .outcome = Outcome::Accepted {
+                        output: output.clone(),
+                    };
+                    restored.decided += 1;
+                }
+
+                Entry::Settled {
+                    unit,
+                    verdict,
+                    output,
+                } => {
+                    self.units
+                        .get_mut(*unit)
+                        .ok_or_else(|| format!("{}: no unit {unit}", at()))?
+                        .outcome = Outcome::Settled {
+                        verdict: verdict.clone(),
+                        output: output.clone(),
+                    };
+                    restored.decided += 1;
+                }
+
+                Entry::Disputed { unit, parties } => {
+                    let held = self
+                        .units
+                        .get_mut(*unit)
+                        .ok_or_else(|| format!("{}: no unit {unit}", at()))?;
+                    // Discarded, not kept. A unit left `Open` while still holding the two
+                    // results that disagreed would never be handed out again — `lease` counts
+                    // results against the quorum — so it would sit there looking available and
+                    // never be worked on.
+                    held.results.clear();
+                    held.leases.clear();
+                    held.outcome = Outcome::Open;
+                    restored.voided.push((*unit, parties.clone()));
+                }
+            }
+        }
+
+        Ok(restored)
+    }
+
     /// A registered workload by id.
     #[must_use]
     pub fn workload(&self, id: &str) -> Option<&Workload> {
@@ -373,17 +542,26 @@ impl Grid {
             if unit.results.iter().any(|r| r.worker == worker) {
                 continue;
             }
-            unit.leases.retain(|(_, expiry)| *expiry > now);
-            if unit.leases.iter().any(|(w, _)| w == worker) {
+            // Already holds it, and has not run out of time. A worker whose lease *has* expired
+            // may take it again — its entry stays as evidence and is refreshed below.
+            if unit
+                .leases
+                .iter()
+                .any(|(who, expiry)| who == worker && *expiry > now)
+            {
                 continue;
             }
-            // Outstanding leases plus results already in hand cover the quorum, so nobody else
-            // is needed yet.
-            if unit.leases.len() + unit.results.len() >= unit.quorum {
+            // Live leases plus results already in hand cover the quorum, so nobody else is
+            // needed yet. Counted rather than pruned: see the field's documentation.
+            let reserved = unit.leases.iter().filter(|(_, e)| *e > now).count();
+            if reserved + unit.results.len() >= unit.quorum {
                 continue;
             }
 
-            unit.leases.push((worker.to_owned(), now + self.lease));
+            match unit.leases.iter_mut().find(|(who, _)| who == worker) {
+                Some(existing) => existing.1 = now + self.lease,
+                None => unit.leases.push((worker.to_owned(), now + self.lease)),
+            }
             return Some(Assignment {
                 unit: index,
                 workload: unit.workload.clone(),
@@ -506,6 +684,27 @@ impl Grid {
             dispute::by_re_execution(&image, &input, &[first.output, second.output]);
         Outcome::Settled { verdict, output }
     }
+}
+
+/// What came back from a journal, for the line a restarted coordinator prints.
+///
+/// Counts rather than a log: the interesting number is how much was *not* lost, and the one
+/// detail worth naming individually is which arguments were dropped, because somebody was in
+/// the middle of them.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct Restored {
+    /// Workloads registered again.
+    pub workloads: usize,
+    /// Units queued again.
+    pub units: usize,
+    /// Results put back.
+    pub results: usize,
+    /// Units whose outcome was already decided.
+    pub decided: usize,
+    /// Leases put back as evidence, so a volunteer that was mid-unit is still recognised.
+    pub leases: usize,
+    /// Units that were mid-argument, and who was arguing. Each is back to `Open`.
+    pub voided: Vec<(usize, [String; 2])>,
 }
 
 /// What a volunteer is told to do.

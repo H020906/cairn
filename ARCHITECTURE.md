@@ -269,8 +269,14 @@ re-executes the unit itself. That fallback is a **route, not a gap**: challengin
 cannot answer would convict it for silence. See
 [ADR-0011](docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
 
-What it does not have: **a database, reputation, canaries, and penalties.** A verdict names who
-lied and who went quiet; nothing yet acts on the difference.
+What it does not have: **reputation, canaries, and penalties.** A verdict names who lied and who
+went quiet; nothing yet acts on the difference.
+
+It does not have a database either, and that is now a decision rather than a gap: state is
+rebuilt from an append-only journal, because every read in the coordinator is a scan of an
+in-memory `Vec` and there is nothing for a query engine to do. What is still missing is a store
+more than one coordinator can share. See
+[ADR-0014](docs/adr/0014-the-coordinator-keeps-a-log-not-a-database.md).
 
 ### `server/` — Java 21 / Spring Boot 3 · **superseded for now**
 The coordinator this describes is what Cairn wants when it has a database, transactions and
@@ -315,7 +321,10 @@ genuinely useful.
 
 ## 5. Data stores
 
-- **PostgreSQL** — the system of record: projects, workloads, work units, assignments,
+- **PostgreSQL** — *deferred by [ADR-0014](docs/adr/0014-the-coordinator-keeps-a-log-not-a-database.md)*
+  for the single-node coordinator, which keeps an append-only journal instead. What it is still
+  wanted for is a record more than one coordinator can share. The system of record: projects,
+  workloads, work units, assignments,
   results, trace commitments, disputes, reputation history.
 - **Redis** — the hot coordination path: assignment queues, unit leases with TTL,
   heartbeats, and pub/sub for dashboard fan-out. Nothing here is authoritative; a total

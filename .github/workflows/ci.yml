@@ -102,6 +102,16 @@ jobs:
             workloads/examples/rust/target/wasm32-unknown-unknown/release/cairn_workload_example.wasm \
             workloads/examples/input-a.bin
 
+      - name: Killing the coordinator does not lose the work people did for it
+        # `--journal` is an append-only log rather than a database (docs/adr/0014), so its
+        # recovery rules are code in this repository and not somebody else's. The two that
+        # matter are not about storage: a unit that was mid-ARGUMENT comes back unassigned,
+        # because resuming would time out whichever party did not return and convict an honest
+        # volunteer for a crash; and a lease comes back EXPIRED, so the volunteer that was
+        # mid-unit can still hand in its answer without the unit being reserved for one that
+        # may be gone. The second was found by a test, not by design.
+        run: cargo test -p cairn-coordinator --test persistence
+
       - name: The coordinator's decisions
         # The coordinator is the one component that can convict an honest volunteer, so its
         # decisions live in `grid.rs` with no HTTP in them and are tested without a socket. The

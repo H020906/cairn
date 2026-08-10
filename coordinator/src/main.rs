@@ -42,24 +42,33 @@ use std::sync::{Arc, Mutex};
 
 use cairn_coordinator::api;
 use cairn_coordinator::grid::{self, Grid};
+use cairn_coordinator::journal::{Entry, Journal};
 
 const USAGE: &str = "\
 cairn-coordinator — dispatch work units to volunteers and settle the disagreements
 
 USAGE
     cairn-coordinator <workload> [input-file ...] [--bind ADDR] [--replicate PERCENT]
+                      [--journal FILE]
 
     <workload>     a .wasm binary or .wat text module, validated and instrumented on startup
     [input-file]   one unit per input file; with none, a single unit with empty input
     --bind         default 127.0.0.1:8080
     --replicate    percentage of units given to a second volunteer as a spot check
                    (default 10; 0 disables). ADR-0001 calls this `r`.
+    --journal      append every decision to FILE, and replay it on startup. Without it the
+                   grid is in memory only and dies with the process.
 
 WHAT IT DOES
     Registers the workload, queues a unit per input, and serves an HTTP API that volunteers
     poll for work. Almost every unit is accepted after a SINGLE execution — that is the
     project's whole claim. A replicated unit whose two answers differ is settled by the
     referee.
+
+    With --journal, the workload and inputs on the command line are only used the FIRST time:
+    afterwards the journal is the grid, and restarting picks up where the process died. A unit
+    that was mid-argument comes back unassigned rather than resumed — nobody can be convicted
+    for a coordinator's crash. See docs/adr/0014.
 
     It also serves `browser/` at the root, so opening the printed URL is enough to start
     contributing with no install.
@@ -88,11 +97,15 @@ fn run(args: &[String]) -> Result<(), String> {
     let mut positional = Vec::new();
     let mut bind = "127.0.0.1:8080".to_owned();
     let mut replicate = grid::DEFAULT_REPLICATION_PERCENT;
+    let mut journal_path: Option<String> = None;
 
     let mut rest = args.iter();
     while let Some(arg) = rest.next() {
         match arg.as_str() {
             "--bind" => bind = rest.next().ok_or("--bind needs an address")?.clone(),
+            "--journal" => {
+                journal_path = Some(rest.next().ok_or("--journal needs a path")?.clone());
+            }
             "--replicate" => {
                 replicate = rest
                     .next()
@@ -112,19 +125,83 @@ fn run(args: &[String]) -> Result<(), String> {
         std::fs::read(workload_path).map_err(|e| format!("could not read {workload_path}: {e}"))?;
 
     let mut grid = Grid::new().with_replication(replicate);
-    let id = grid.register(workload_path, &source)?;
 
-    println!("workload      {workload_path}");
-    println!("unit id       {id}");
+    // Open the journal before touching the grid, so that a file this build cannot read stops the
+    // coordinator rather than being silently replaced by a fresh grid over the top of it.
+    let mut journal = match &journal_path {
+        None => None,
+        Some(path) => {
+            let (journal, history) = Journal::open(std::path::Path::new(path))
+                .map_err(|e| format!("could not open the journal {path}: {e}"))?;
+            let restored = grid
+                .restore(&history)
+                .map_err(|e| format!("the journal {path} does not describe this build: {e}"))?;
 
-    if inputs.is_empty() {
-        grid.submit(&id, Vec::new())?;
-    } else {
-        for path in inputs {
-            let input =
-                std::fs::read(path).map_err(|e| format!("could not read input {path}: {e}"))?;
-            grid.submit(&id, input)?;
+            println!("journal       {path}");
+            if history.is_empty() {
+                println!("              new — nothing to recover");
+            } else {
+                println!(
+                    "recovered     {} workloads, {} units, {} results, {} already decided",
+                    restored.workloads, restored.units, restored.results, restored.decided
+                );
+                // Named individually rather than counted, because somebody was in the middle of
+                // each of these and the operator should be able to see who.
+                for (unit, parties) in &restored.voided {
+                    println!(
+                        "              unit {unit} was mid-argument between {} and {} — voided                          and queued again; neither is at fault",
+                        parties.first().map_or("?", String::as_str),
+                        parties.get(1).map_or("?", String::as_str),
+                    );
+                }
+            }
+            Some(journal)
         }
+    };
+
+    // The command line describes the grid only when the journal did not. Re-registering and
+    // re-queueing on every restart would duplicate every unit in the file, which is the
+    // straightforward way a "resumable" coordinator quietly does all its work twice.
+    if grid.units().is_empty() {
+        let id = grid.register(workload_path, &source)?;
+        if let Some(journal) = journal.as_mut() {
+            journal
+                .append(&Entry::Registered {
+                    name: workload_path.clone(),
+                    source: source.clone(),
+                })
+                .map_err(|e| format!("could not write to the journal: {e}"))?;
+        }
+
+        println!("workload      {workload_path}");
+        println!("unit id       {id}");
+
+        let mut queue = |input: Vec<u8>| -> Result<(), String> {
+            let unit = grid.submit(&id, input.clone())?;
+            let quorum = grid.unit(unit).map_or(1, |u| u.quorum);
+            if let Some(journal) = journal.as_mut() {
+                journal
+                    .append(&Entry::Queued {
+                        workload: id.clone(),
+                        input,
+                        quorum,
+                    })
+                    .map_err(|e| format!("could not write to the journal: {e}"))?;
+            }
+            Ok(())
+        };
+
+        if inputs.is_empty() {
+            queue(Vec::new())?;
+        } else {
+            for path in inputs {
+                let input =
+                    std::fs::read(path).map_err(|e| format!("could not read input {path}: {e}"))?;
+                queue(input)?;
+            }
+        }
+    } else {
+        println!("workload      from the journal; the command line was not used");
     }
 
     println!("units queued  {}", grid.units().len());
@@ -139,5 +216,10 @@ fn run(args: &[String]) -> Result<(), String> {
         .into_iter()
         .find(|candidate| std::path::Path::new(candidate).join("index.html").is_file());
 
-    api::serve(Arc::new(Mutex::new(grid)), &bind, web_root)
+    api::serve(
+        Arc::new(Mutex::new(grid)),
+        &bind,
+        web_root,
+        journal.map(|journal| Arc::new(Mutex::new(journal))),
+    )
 }

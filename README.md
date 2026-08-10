@@ -168,8 +168,8 @@ and an earlier version of this benchmark would have reported those numbers as fi
 | Coordinator | **Rust**, `tiny_http` | **The referee executes** — adjudication steps a machine rebuilt from a state witness, so a Java coordinator would need JNI, a subprocess, or a second implementation of consensus-critical code. Java 21 + Spring is what it wants once there is a database; [ADR-0010](docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md) suspends that rather than overturning it |
 | Execution kernel | **Rust** | Deterministic interpretation and instruction-level replay; the JVM cannot do this |
 | Browser worker | **JavaScript**, no build step | Zero-install contribution inside a Web Worker, around the engine already in the page. Rust→WASM was the plan until ADR-0005 made it unnecessary |
-| Native worker | **Rust** + SQLite | Single binary, resumable, for donated machines |
-| System of record | **PostgreSQL** | Units, results, trace commitments, disputes |
+| Native worker | **Rust** | Single binary, multi-core, for donated machines |
+| System of record | **an append-only log** | Units, results, disputes. PostgreSQL is deferred, not planned: the coordinator has no queries to serve, and every read is a scan of a `Vec` — [ADR-0014](docs/adr/0014-the-coordinator-keeps-a-log-not-a-database.md) |
 | Hot path | **Redis** | Queues, leases, heartbeats, dashboard fan-out |
 | Frontend | **React 19** + TS + Tailwind + three.js | The globe shows live node topology, not an animation |
 
@@ -312,7 +312,7 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-295 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+310 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
 checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
 randomly generated float expressions and 200 whole generated modules per run, a bisection game
 that converges on a corrupted instruction, and an adjudication that names the liar without
@@ -325,23 +325,25 @@ Cairn is being built in a deliberately short, fixed window, with a bias toward *
 finished* over *broad and abandoned*.
 
 **What exists is the verification kernel, two workers, a coordinator that ties them into a
-system, and the interactive dispute protocol running over it.** What is not here: a database,
-reputation, canaries, penalties, a dashboard, and a real scientific workload. That is stated
+system, the interactive dispute protocol running over it, and a journal that survives killing
+it.** What is not here: reputation, canaries, penalties, a dashboard, and a real scientific
+workload. That is stated
 plainly rather than left implied by unticked boxes.
 
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~16.4k lines of Rust source, 295 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~17.2k lines of Rust source, 310 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
 | **Browser volunteer** | **Done** — a Web Worker around the page's own engine; no install, no dependencies, no build step |
-| **Coordinator: registration, queue, leases, quorum, referee** | **Done** — Rust, in memory, no database; the system runs end to end |
+| **Coordinator: registration, queue, leases, quorum, referee** | **Done** — Rust, in memory; the system runs end to end |
 | **The interactive dispute protocol, over the network** | **Done** — 1,050,030 instructions settled in 20 rounds and **one** executed instruction |
 | **A volunteer that uses the whole machine** | **Done** — parallelism computed from memory rather than configured; 7.2× on a 16-thread laptop, which is 96% of what the machine can give |
 | **The browser's engine in the determinism gate** | **Done** — 1,046 units through the volunteer's own host on V8. It caught a real NaN-sign divergence the moment its teeth were checked |
-| Coordinator: persistence, heartbeats | Not started |
+| **Coordinator: persistence** | **Done** — an append-only journal, not a database. Killed outright mid-run and restarted: 60 units, 60 executed, nothing lost and nothing repeated |
+| Coordinator: heartbeats, log compaction | Not started — the journal only grows |
 | Verification policy: canaries, reputation, penalties | Not started — the replication rate exists and verdicts name who lied; nothing acts on it |
 | Dashboard + live globe | Not started |
 | A real scientific workload (molecular docking) | Not started |

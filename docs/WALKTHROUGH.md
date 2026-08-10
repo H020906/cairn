@@ -292,6 +292,48 @@ roughly half the throughput each, and lower clocks when they are all busy. It ge
 operating system reports.** Anyone sizing a volunteer grid by adding up reported cores will be
 out by close to a factor of two.
 
+## 5e · Kill it and start it again
+
+Add `--journal`, and the coordinator writes down every decision it makes:
+
+```bash
+cargo run --release -p cairn-coordinator -- workloads/examples/sum-of-squares.wat   workloads/examples/input-a.bin workloads/examples/input-b.bin --journal cairn.journal
+```
+
+Kill it partway through — not a shutdown, a `SIGKILL` — and start the same command again:
+
+```
+journal       cairn.journal
+recovered     1 workloads, 60 units, 16 results, 16 already decided
+workload      from the journal; the command line was not used
+units queued  60
+```
+
+Volunteers reconnect and carry on. The recovery line above is from a larger run than the two
+units in that command — 60 units of `busy-loop.wat`, one four-job volunteer, the coordinator
+killed outright partway through. Across both lives: **60 units, 60 executions, none lost and none
+repeated.** The journal was 17 kB.
+
+It is a log, not a database, and
+[ADR-0014](adr/0014-the-coordinator-keeps-a-log-not-a-database.md) is why: every read in the
+coordinator is a linear scan of an in-memory `Vec`, so there is nothing for a query engine to do,
+and SQLite would put a bundled C library into the component that decides who is convicted of
+cheating.
+
+Two things it deliberately does not restore, and both matter more than the storage:
+
+**A unit that was mid-argument comes back unassigned.** A dispute is a live protocol — a blocking
+referee, two mailboxes, two volunteers mid-replay — and it cannot be rebuilt from a file. Resuming
+it would mean timing out whichever party did not come back, which **convicts an honest volunteer
+for the coordinator's crash.** So the argument is voided, the unit is queued again, and the
+restarted coordinator prints whose argument it dropped.
+
+**A lease comes back expired.** That sounds like a detail and it is the reason leases are recorded
+at all. A lease is two things: *evidence* that a worker was given a unit, and a *reservation*
+against other workers. Restoring only the evidence means the volunteer that was mid-unit when the
+process died can still hand in its answer — the first version of this feature refused it with
+`NotLeased`, and a test caught it — while the unit stays available to everybody else immediately.
+
 ## 6 · Just the browser worker, with no coordinator
 
 ```bash

@@ -24,6 +24,7 @@ done this way?"*
 | [0011](0011-a-volunteer-that-cannot-argue-is-not-challenged.md) | A volunteer that cannot argue is not challenged | Accepted, corrects 0010 in part |
 | [0012](0012-the-answer-is-part-of-the-committed-state.md) | The answer is part of the committed state | Accepted, completes 0011 |
 | [0013](0013-a-volunteer-computes-its-own-parallelism.md) | A volunteer computes its own parallelism, and reports under one name | Accepted |
+| [0014](0014-the-coordinator-keeps-a-log-not-a-database.md) | The coordinator keeps a log, not a database | Accepted, amends 0002 |
 
 ## Reading order
 
@@ -81,6 +82,13 @@ easy to give, and a scaling curve that bends at exactly the machine's performanc
 sixteen-thread laptop donates about seven cores' worth of work, so counting reported cores
 over-promises by nearly 2× — a fact about hardware that any distributed-computing project will
 meet and few write down.
+
+**0014** is the project deciding *against* its own architecture document. `ARCHITECTURE.md` says
+SQLite; writing it found the coordinator has no queries to serve, so persistence is an append-only
+log in the standard library instead. Read it for two things beyond the storage argument: what a
+restart does to an argument somebody was in the middle of, and the finding that a lease is
+**evidence** and a **reservation** at the same time — restoring only the first is what stops a
+volunteer being punished for the coordinator crashing under it.
 
 ## Format
 

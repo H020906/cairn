@@ -48,13 +48,19 @@ use cairn_runtime::dispute::Party;
 
 use crate::dispute::{Answer, Conclusion, Dispute, Question};
 use crate::grid::{Grid, Outcome, Submission};
+use crate::journal::{Entry, Journal};
 
 /// Serve until killed.
 ///
 /// # Errors
 ///
 /// If the address cannot be bound.
-pub fn serve(grid: Arc<Mutex<Grid>>, address: &str, web_root: Option<&str>) -> Result<(), String> {
+pub fn serve(
+    grid: Arc<Mutex<Grid>>,
+    address: &str,
+    web_root: Option<&str>,
+    journal: Option<Arc<Mutex<Journal>>>,
+) -> Result<(), String> {
     let server = Server::http(address).map_err(|e| format!("could not bind {address}: {e}"))?;
 
     println!("Cairn coordinator → http://{address}");
@@ -69,20 +75,25 @@ pub fn serve(grid: Arc<Mutex<Grid>>, address: &str, web_root: Option<&str>) -> R
         // a program somebody else wrote, and the paths below touch it. `catch_unwind` is not
         // available across the `Request` type cleanly, so the handler is written to return
         // errors rather than unwrap.
-        if let Err(e) = handle(&grid, request, web_root) {
+        if let Err(e) = handle(&grid, request, web_root, journal.as_ref()) {
             eprintln!("request failed: {e}");
         }
     }
     Ok(())
 }
 
-fn handle(grid: &Arc<Mutex<Grid>>, request: Request, web_root: Option<&str>) -> Result<(), String> {
+fn handle(
+    grid: &Arc<Mutex<Grid>>,
+    request: Request,
+    web_root: Option<&str>,
+    journal: Option<&Arc<Mutex<Journal>>>,
+) -> Result<(), String> {
     let url = request.url().to_owned();
     let path = url.split('?').next().unwrap_or("").to_owned();
 
     match path.as_str() {
-        "/api/lease" => lease(grid, request, &url),
-        "/api/result" => result(grid, request, &url),
+        "/api/lease" => lease(grid, request, &url, journal),
+        "/api/result" => result(grid, request, &url, journal),
         "/api/challenge" if request.method() == &tiny_http::Method::Post => {
             answer_challenge(grid, request, &url)
         }
@@ -97,16 +108,100 @@ fn handle(grid: &Arc<Mutex<Grid>>, request: Request, web_root: Option<&str>) -> 
     }
 }
 
+// --- the journal ------------------------------------------------------------------------------
+
+/// What a result and its outcome mean for the record.
+///
+/// The result itself always, and the outcome only when the unit stopped being `Open` — an
+/// outcome of `Open` means the grid is still waiting for a second opinion, and there is nothing
+/// decided to write down.
+///
+/// `Disputed` records the parties and not the argument. A dispute cannot be resumed from a file
+/// and must not be: restarting into a half-finished argument would time out whichever party did
+/// not come back and convict a volunteer for the coordinator's crash. See
+/// [`crate::journal`].
+fn entries_for(grid: &Grid, unit: usize, submission: &Submission, outcome: &Outcome) -> Vec<Entry> {
+    let mut entries = vec![Entry::Answered {
+        unit,
+        worker: submission.worker.clone(),
+        output: submission.output.clone(),
+        fuel: submission.fuel,
+        bisects: submission.bisects,
+    }];
+
+    match outcome {
+        Outcome::Open => {}
+        Outcome::Accepted { output } => entries.push(Entry::Accepted {
+            unit,
+            output: output.clone(),
+        }),
+        Outcome::Settled { verdict, output } => entries.push(Entry::Settled {
+            unit,
+            verdict: verdict.clone(),
+            output: output.clone(),
+        }),
+        // Both names, read back off the dispute the grid just opened. The obvious shortcut —
+        // this submission's worker twice — produces a record that looks complete and names one
+        // party, which is exactly the shape of thing that goes unnoticed until reputation needs
+        // to know whose argument was dropped.
+        Outcome::Disputed { dispute } => {
+            let parties = grid
+                .dispute(*dispute)
+                .map(|argument| argument.parties.clone())
+                .unwrap_or_else(|| [submission.worker.clone(), String::new()]);
+            entries.push(Entry::Disputed { unit, parties });
+        }
+    }
+    entries
+}
+
+/// Append entries, reporting a failure without dropping the request.
+///
+/// A journal that cannot be written is a serious problem and **not** a reason to fail the
+/// volunteer's request: the work was done, the grid has accepted it, and refusing the result now
+/// would throw away somebody's electricity to protest about a disk. It is reported loudly and
+/// the coordinator carries on with a record that is known to be short.
+fn record(journal: &Arc<Mutex<Journal>>, entries: &[Entry]) {
+    let Ok(mut journal) = journal.lock() else {
+        eprintln!("journal lock poisoned; THIS COORDINATOR IS NO LONGER RECOVERABLE");
+        return;
+    };
+    for entry in entries {
+        if let Err(e) = journal.append(entry) {
+            eprintln!("could not write to the journal: {e}");
+            eprintln!("  the grid is correct in memory and will NOT survive a restart intact");
+            return;
+        }
+    }
+}
+
 // --- endpoints -------------------------------------------------------------------------------
 
-fn lease(grid: &Arc<Mutex<Grid>>, request: Request, url: &str) -> Result<(), String> {
+fn lease(
+    grid: &Arc<Mutex<Grid>>,
+    request: Request,
+    url: &str,
+    journal: Option<&Arc<Mutex<Journal>>>,
+) -> Result<(), String> {
     let Some(worker) = query(url, "worker") else {
         return respond(request, 400, "text/plain", b"worker= is required".to_vec());
     };
 
     let assignment = {
         let mut grid = grid.lock().map_err(|_| "grid lock poisoned")?;
-        grid.lease(&worker, Instant::now())
+        let assignment = grid.lease(&worker, Instant::now());
+        // Recorded so that a volunteer which was mid-unit when the coordinator died is still
+        // recognised when it comes back with the answer. Not flushed — see `Journal::append`.
+        if let (Some(journal), Some(a)) = (journal, assignment.as_ref()) {
+            record(
+                journal,
+                &[Entry::Leased {
+                    unit: a.unit,
+                    worker: worker.clone(),
+                }],
+            );
+        }
+        assignment
     };
 
     match assignment {
@@ -128,7 +223,12 @@ fn lease(grid: &Arc<Mutex<Grid>>, request: Request, url: &str) -> Result<(), Str
     }
 }
 
-fn result(grid: &Arc<Mutex<Grid>>, mut request: Request, url: &str) -> Result<(), String> {
+fn result(
+    grid: &Arc<Mutex<Grid>>,
+    mut request: Request,
+    url: &str,
+    journal: Option<&Arc<Mutex<Journal>>>,
+) -> Result<(), String> {
     let (Some(unit), Some(worker)) = (query(url, "unit"), query(url, "worker")) else {
         return respond(
             request,
@@ -162,17 +262,25 @@ fn result(grid: &Arc<Mutex<Grid>>, mut request: Request, url: &str) -> Result<()
         return respond(request, 400, "text/plain", b"body must be hex".to_vec());
     };
 
+    let submission = Submission {
+        worker,
+        output,
+        fuel,
+        bisects,
+    };
+
     let outcome = {
         let mut grid = grid.lock().map_err(|_| "grid lock poisoned")?;
-        let outcome = grid.submit_result(
-            unit,
-            Submission {
-                worker,
-                output,
-                fuel,
-                bisects,
-            },
-        );
+        let outcome = grid.submit_result(unit, submission.clone());
+
+        // Written only when the grid *accepted* the result, and while its lock is still held.
+        // Journalling a refused submission would put a result into the record that no restarted
+        // coordinator would ever have taken, and journalling outside the lock would let two
+        // results interleave into an order the grid never saw.
+        if let (Some(journal), Ok(decided)) = (journal, &outcome) {
+            record(journal, &entries_for(&grid, unit, &submission, decided));
+        }
+
         // Rendered while the lock is held, because describing a `Disputed` outcome means
         // reading the dispute it points at.
         outcome.map(|outcome| describe(&grid, &outcome))

@@ -146,7 +146,9 @@ fn run(args: &[String]) -> Result<(), String> {
         );
     }
 
-    api::serve(grid, &bind, Some(&web_root))
+    // No journal: the demo is a thing you watch for two minutes, and a grid it resumed from
+    // an earlier run would start already finished.
+    api::serve(grid, &bind, Some(&web_root), None)
 }
 
 /// Find the workload and the page, whether run from the repository root or from `demo/`.
