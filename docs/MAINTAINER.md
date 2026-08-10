@@ -40,7 +40,7 @@ machine in about two minutes:
 cargo test --workspace
 ```
 
-294 tests. If they are green, the following is true.
+295 tests. If they are green, the following is true.
 
 **You can take an untrusted WebAssembly module and make it deterministic.** `validate.rs`
 rejects anything with a host-dependent escape (threads, SIMD, reference types, any import

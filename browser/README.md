@@ -36,7 +36,7 @@ Their hash is the work unit's identity. A volunteer that could rewrite its own w
 be a volunteer whose result means nothing, so it cannot, and it does not need a Rust toolchain
 to take part.
 
-## The five files
+## The six files
 
 | file | what it is |
 |---|---|
@@ -45,6 +45,7 @@ to take part.
 | `policy.js` | **Pure.** When to take work and how much of the machine to use. The only file with decisions in it. |
 | `environment.js` | Everything that touches `navigator`, kept apart from everything that decides. |
 | `index.html` | The page. |
+| `differential.js` | Not part of a volunteer. Runs a corpus through `host.js` so the determinism gate can include **this** engine — see below. |
 
 `policy.js` is separate from `environment.js` for one reason: a volunteer's manners towards the
 machine it is running on should be assertions, not comments.
@@ -65,6 +66,35 @@ Twelve of them, and they run in CI. What they pin:
   web without ever saying so.
 - **A full share never takes the last core.** The page still has to respond to the person who
   opened it, and a browser that stutters is a browser that gets closed.
+
+## This engine is in the determinism gate, and it found something
+
+```bash
+cargo test --test differential the_browsers_own_engine -- --nocapture
+```
+
+> `browser engine: 1046 units agreed with Cairn's interpreter`
+
+`differential.js` runs a generated corpus through `host.js` — the same three host functions
+`worker.js` uses — and Rust compares the results against Cairn's interpreter: output, whether it
+trapped, and the exact instruction count. Until this existed, **the engine at the centre of the
+design was the only one in the system that nothing checked**, while wasmi and wasmtime, neither
+of which any volunteer runs, were checked on every push.
+
+The failure it guards is the project's worst shape. Cairn does not detect a wrong answer, it
+detects a *disagreement*, and then decides which party lied. A browser engine that disagreed
+with Cairn's interpreter would not be caught cheating — it would be **convicted** of it, in a
+dispute it had no way to win, for running in a browser.
+
+**That is not hypothetical.** Delete the `f64.copysign` escape site from `canon::escape_site`
+and V8 disagrees immediately: `-1.5` where Cairn says `+1.5`. The sign of a computed NaN is
+unspecified, and V8 exercises that freedom in the opposite direction from Cairn's interpreter.
+[ADR-0006](../docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md) argued for that
+entry from the specification and called it the one most easily missed; this is the evidence.
+
+It is Node, so it is V8 without a browser around it. A headless matrix over V8, SpiderMonkey and
+JavaScriptCore is the obvious next step, and it needs a toolchain this directory deliberately
+does not have.
 
 ## The one thing a browser cannot do
 

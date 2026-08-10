@@ -105,8 +105,9 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | Metering does not change what a program computes | **Confirmed.** Every differential case, both engines, identical output and trapping |
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
 | A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |
-| A NaN payload cannot change an answer | **Confirmed** across three engines, including a JIT, on 300 randomly generated float expressions. Checked for teeth: deleting one escape site makes it fail |
-| The interpreter agrees with real engines on arbitrary code | **Not yet.** Whole-module generation found a bug on its first run — `br 0` at function scope returns, and Cairn had no function label. Fixed; 146 generated modules now agree. Absence of evidence, so far |
+| A NaN payload cannot change an answer | **Confirmed** across four engines, including a JIT and the browser's own, on 300 randomly generated float expressions. Checked for teeth against the engine it is about: delete the `copysign` escape site and **V8 answers `-1.5` where Cairn answers `+1.5`** |
+| The engine volunteers actually run agrees with Cairn | **Confirmed, and it was unchecked until now.** 1,046 generated units through the browser worker's own `host.js` on V8 — output, trap behaviour and exact instruction count. Every other engine in the gate is Rust linked into the test binary; none of them is the one this project is for |
+| The interpreter agrees with real engines on arbitrary code | **Not yet.** Whole-module generation found a bug on its first run — `br 0` at function scope returns, and Cairn had no function label. Fixed; 146 generated modules now agree, on Cairn, wasmi, wasmtime and V8. Absence of evidence, so far |
 | The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
 | Cairn beats replication on cost | **Yes, currently.** ≈1.09×–1.18× against replication's ≈2.0×, on all four workload shapes |
 | Arbitrating a dispute is cheap **for the coordinator** | **Confirmed.** `O(log n)` messages and one instruction, whatever the execution length |
@@ -311,7 +312,7 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-294 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+295 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
 checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
 randomly generated float expressions and 200 whole generated modules per run, a bisection game
 that converges on a corrupted instruction, and an adjudication that names the liar without
@@ -331,7 +332,7 @@ plainly rather than left implied by unticked boxes.
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~16.1k lines of Rust source, 294 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~16.4k lines of Rust source, 295 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
@@ -339,6 +340,7 @@ plainly rather than left implied by unticked boxes.
 | **Coordinator: registration, queue, leases, quorum, referee** | **Done** — Rust, in memory, no database; the system runs end to end |
 | **The interactive dispute protocol, over the network** | **Done** — 1,050,030 instructions settled in 20 rounds and **one** executed instruction |
 | **A volunteer that uses the whole machine** | **Done** — parallelism computed from memory rather than configured; 7.2× on a 16-thread laptop, which is 96% of what the machine can give |
+| **The browser's engine in the determinism gate** | **Done** — 1,046 units through the volunteer's own host on V8. It caught a real NaN-sign divergence the moment its teeth were checked |
 | Coordinator: persistence, heartbeats | Not started |
 | Verification policy: canaries, reputation, penalties | Not started — the replication rate exists and verdicts name who lied; nothing acts on it |
 | Dashboard + live globe | Not started |

@@ -129,6 +129,23 @@ all of it to agree across two engines and two instrumentation settings.
 `0.0/0.0` would have proved nothing: both engines return the canonical pattern for it, so
 canonicalizing and not canonicalizing produce identical bytes.
 
+**Confirmed later against the engine this is actually about, and the confirmation is not
+theoretical** (2026-08-10). When the browser volunteer's own engine was added to the
+differential gate, the same teeth check was run against it: delete `F64Copysign` from
+`escape_site`, and **V8 disagrees with Cairn's interpreter immediately** — `+1.5` against
+`-1.5`, on the third generated float expression, under the honest configuration.
+
+That is worth stating plainly, because this ADR argued for the `copysign` entry from the
+specification rather than from evidence and called it "the one most easily missed":
+
+> The *sign* of a computed NaN is as unspecified as its payload.
+
+It is unspecified, and **V8 exercises the freedom in the opposite direction from Cairn's
+interpreter.** So this entry is not defensive programming against a hypothetical engine. Without
+it, every volunteer running a browser would eventually produce a different answer from every
+volunteer running Cairn's interpreter, be disputed, and lose — convicted of cheating for the
+offence of running in a browser. See `runtime/tests/differential.rs`.
+
 **Limiting — this is honest-path only, and deliberately.** The dispute path still canonicalizes
 after every NaN-producing operation, because arbitration compares machine states and a
 non-canonical NaN in a local would make two honest workers' commitments differ. Metering and

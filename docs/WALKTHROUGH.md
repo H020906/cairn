@@ -133,8 +133,10 @@ result        bd3e5cfce4250000
 ```
 
 Same answer as step 1, **different engine and different instrumentation.** That equality is the
-assumption the whole design rests on, and it is checked by a differential gate against two
-independent engines on every push.
+assumption the whole design rests on, and it is checked by a differential gate against three
+independent engines on every push — wasmi, wasmtime, and **the engine in a browser**, reached
+through the volunteer's own `host.js`. That third one was added last and is the one that
+matters: every volunteer this project is designed for runs it.
 
 This is what a challenged party pays: they re-execute under Cairn's interpreter, because their
 own engine cannot produce a commitment. Under controlled measurement that costs them **37×–142×**
@@ -320,7 +322,7 @@ small unit is not a measurement. **What this page demonstrates is agreement, not
 ## Checking the claims instead of believing them
 
 ```bash
-cargo test --workspace        # 294 tests
+cargo test --workspace        # 295 tests
 cargo bench                   # regenerates docs/benchmarks.md
 ```
 

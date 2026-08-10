@@ -55,16 +55,30 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # The differential gate now includes the engine volunteers actually run, and reaching it
+      # means starting a Node process. Declared here rather than relying on the runner image
+      # having Node preinstalled: the test skips when `node` is missing, and a silent skip in
+      # THIS job is the one outcome that must not be possible.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
 
-      - name: Cairn's interpreter vs two independent engines
+      - name: Cairn's interpreter vs three independent engines, one of them a browser's
         # THIS GATE IS NOT ADVISORY. Dispute arbitration is sound only while honest engines
         # running the same instrumented module agree exactly. If they can diverge, arbitration
         # does not catch cheats — it convicts whichever honest volunteer was running the engine
         # that lost. See docs/adr/0003.
         #
-        # Two references, deliberately of different kinds: wasmi interprets, wasmtime compiles
-        # through Cranelift. A compiler can go wrong in ways an interpreter cannot, and those
-        # are exactly the ways that break bit-exact agreement.
+        # Three references, deliberately of different kinds. wasmi interprets; wasmtime compiles
+        # through Cranelift; V8 is the engine in a volunteer's browser, reached through the
+        # volunteer's own host.js. A compiler can go wrong in ways an interpreter cannot, and
+        # those are exactly the ways that break bit-exact agreement.
+        #
+        # CAIRN_REQUIRE_NODE turns "node is missing, so the browser was not checked" from a
+        # printed skip into a failure. The skip exists so a Rust contributor without Node can
+        # still run `cargo test`; it must never be what happens here.
+        env:
+          CAIRN_REQUIRE_NODE: "1"
         run: cargo test --test differential -- --nocapture
 
       - name: The exact costs have not moved without saying so
@@ -169,7 +183,7 @@ jobs:
         # run explores the same inputs every time — breadth comes from the number of cases, not
         # from repetition.
         run: |
-          echo "::notice title=Differential coverage::Three engines (Cairn, wasmi, wasmtime). Randomly generated: 300 float expressions and 200 whole modules per run, from fixed seeds. Generated modules are compared under full instrumentation only; the honest-path comparison runs on the float generator and the hand-written corpus, where termination is guaranteed."
+          echo "::notice title=Differential coverage::Four engines (Cairn, wasmi, wasmtime, and V8 through the browser volunteer's own host). Randomly generated: 300 float expressions and 200 whole modules per run, from fixed seeds. Generated modules are compared under full instrumentation only; the honest-path comparison runs on the float generator and the hand-written corpus, where termination is guaranteed. V8 is reached through Node, so it is V8 without a browser around it — a headless matrix over V8, SpiderMonkey and JavaScriptCore is the next step."
 
   browser:
     name: Browser volunteer (JavaScript)

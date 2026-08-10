@@ -87,7 +87,19 @@ export async function runUnit(bytes, input) {
   memory = instance.exports.memory;
 
   const started = performance.now();
-  instance.exports.cairn_run();
+  try {
+    instance.exports.cairn_run();
+  } catch (trap) {
+    // A trap is a legitimate outcome of a work unit and the caller already treats it as one.
+    // What was being thrown away is *how far it got*: a trapping execution has still charged
+    // fuel, and that count is the difference between "these two engines disagree" and "these
+    // two engines disagree at instruction 4,182". The thrown error is the only channel a trap
+    // has, so the count travels on it. `worker.js` reads `.message` and is unaffected.
+    if (trap && typeof trap === 'object') {
+      trap.cairnFuel = readFuel(instance, chargedFuel);
+    }
+    throw trap;
+  }
   const milliseconds = performance.now() - started;
 
   return { output, fuel: readFuel(instance, chargedFuel), milliseconds };

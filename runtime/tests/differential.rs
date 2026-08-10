@@ -1,4 +1,5 @@
-//! Differential testing: Cairn's interpreter against two independent WebAssembly engines.
+//! Differential testing: Cairn's interpreter against three independent WebAssembly engines,
+//! one of which is the engine volunteers actually run.
 //!
 //! # Why this file is the most important test in the project
 //!
@@ -21,8 +22,23 @@
 //! break a scheme resting on bit-exact agreement. Agreement between an interpreter and a JIT
 //! is far stronger evidence than agreement between two interpreters.
 //!
-//! wasmtime is also the nearest thing here to Cairn's fast path, which is a browser JIT and
-//! does not exist yet.
+//! # The third reference is the point of the whole project
+//!
+//! wasmi and wasmtime are both Rust, both linked into this binary, and **neither is the engine
+//! this project is for**. A volunteer opens a tab and the unit runs on V8 or SpiderMonkey.
+//! [`the_browsers_own_engine_agrees_with_cairn`] sends the generated corpus through
+//! `browser/differential.js`, which imports the volunteer's own `host.js` — the same three host
+//! functions `worker.js` uses — and compares what came back. It costs a process boundary and it
+//! is worth it: until it existed, the engine at the centre of the design was the only one in the
+//! system that nothing checked.
+//!
+//! **It has teeth, and the proof is unusually direct.** Delete the `f64.copysign` escape site
+//! from `canon::escape_site` and V8 immediately disagrees with Cairn's interpreter: `+1.5`
+//! against `-1.5`, on `float case 2` under the honest configuration. So
+//! [ADR-0006](../../docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md)'s
+//! reasoning about NaN signs is not defensive programming against a hypothetical engine — the
+//! engine volunteers actually use **does** choose the other sign, and canonicalizing it is what
+//! stops an honest browser volunteer from losing a dispute it could not win.
 //!
 //! # Where the cases come from
 //!
@@ -1396,4 +1412,282 @@ fn a_deliberate_divergence_is_caught() {
     let outcome = run_wasmi(&a, &[]);
     assert_eq!(outcome.output, Some(1i64.to_le_bytes().to_vec()));
     assert!(outcome.fuel > 0, "the reference engine charged no fuel");
+}
+
+// --- the fourth engine: the one volunteers actually use ---------------------------------------
+
+/// One case handed to the browser's engine, with what Cairn made of it kept on this side.
+struct BrowserCase {
+    name: String,
+    module: Vec<u8>,
+    input: Vec<u8>,
+    expected: Outcome,
+}
+
+/// Is `node` on the path?
+///
+/// Checked rather than assumed, because a Rust contributor with no Node installed should still
+/// be able to run `cargo test` — and because a test that pretends to have run is worse than one
+/// that says it did not. See the skip handling in
+/// [`the_browsers_own_engine_agrees_with_cairn`].
+fn node_is_available() -> bool {
+    std::process::Command::new("node")
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn to_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    bytes.iter().fold(String::new(), |mut out, byte| {
+        let _ = write!(out, "{byte:02x}");
+        out
+    })
+}
+
+fn from_hex(text: &str) -> Option<Vec<u8>> {
+    if text.len() % 2 != 0 {
+        return None;
+    }
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
+/// Every case worth handing to a browser, built from the two generators.
+///
+/// The hand-written corpus is deliberately absent. It covers instruction semantics a mature
+/// engine is not going to get wrong in a way the generated modules would miss, and keeping this
+/// to the generators is what makes the corpus large enough to be worth a process boundary. What
+/// the generators cover is exactly the two things a *different* engine could plausibly differ
+/// on:
+///
+/// - **Float expressions under the honest configurations.** The highest-value case in the file.
+///   `Canonicalization::AtEscapes` is the newest and least-proven reasoning in this repository
+///   ([ADR-0006]), the browser runs the honest path in production, and V8 is a JIT — so constant
+///   folding, fused multiply-add and reassociation are available to it and to no engine already
+///   in this gate except wasmtime.
+/// - **Whole generated modules under full instrumentation**, for control flow, memory, calls and
+///   the combinations nobody would write down. Full instrumentation only, for the reason
+///   [`generated_modules_agree_across_engines`] gives: a generated module halts because
+///   `ensure_termination` injected a counter, and pairing that with the honest path would
+///   compare two different termination stories.
+///
+/// [ADR-0006]: ../../docs/adr/0006-canonicalize-nans-at-escapes-on-the-honest-path.md
+fn browser_corpus() -> Vec<BrowserCase> {
+    const FLOAT_CASES: u32 = 300;
+    const MODULE_CASES: u64 = 200;
+
+    let mut corpus = Vec::new();
+
+    // The same seed as `random_float_expressions_agree_across_engines`, so both tests look at
+    // the same expressions and a failure here can be reproduced there.
+    let mut rng = Rng(0x5eed_1234_abcd_ef01);
+    for case in 0..FLOAT_CASES {
+        let seed = rng.0;
+        let depth = 2 + (case % 3);
+        let expression = random_f64(&mut rng, depth);
+        let escape = match case % 3 {
+            0 => format!("(f64.store (i32.const 0) {expression})"),
+            1 => format!("(i64.store (i32.const 0) (i64.reinterpret_f64 {expression}))"),
+            _ => format!("(f64.store (i32.const 0) (f64.copysign (f64.const 1.5) {expression}))"),
+        };
+        let text = format!(
+            r#"(module
+                 (import "cairn" "output" (func $output (param i32 i32)))
+                 (memory (export "memory") 1 8)
+                 (global $g (mut f64) (f64.const 0))
+                 (func (export "cairn_run") (local $x f64)
+                   (local.set $x (f64.reinterpret_i64 (i64.const 0x7ff8000000000005)))
+                   (global.set $g {expression})
+                   {escape}
+                   (call $output (i32.const 0) (i32.const 8))))"#
+        );
+
+        let configs = [
+            ("dispute", Config::default()),
+            ("honest", HONEST_CONFIGS[0]),
+            ("honest-everywhere", HONEST_CONFIGS[1]),
+        ];
+        for (which, config) in configs {
+            let module = canonical_with(&text, config);
+            let expected = run_cairn(&module, &[]);
+            if expected.hit_a_cairn_limit {
+                continue;
+            }
+            corpus.push(BrowserCase {
+                name: format!("float case {case} ({which}, seed {seed:#x})"),
+                module,
+                input: Vec::new(),
+                expected,
+            });
+        }
+    }
+
+    for case in 0..MODULE_CASES {
+        let seed = 0x9e37_79b9_7f4a_7c15u64.wrapping_mul(case + 1);
+        let Some(source) = generated_module(seed) else {
+            continue;
+        };
+        if validate::validate_submitted(&source, validate::Limits::default()).is_err() {
+            continue;
+        }
+        let Ok(module) = canon::instrument(&source, Config::default()) else {
+            continue;
+        };
+        let expected = run_cairn(&module, &[]);
+        if expected.hit_a_cairn_limit {
+            continue;
+        }
+        corpus.push(BrowserCase {
+            name: format!("generated module {case} (seed {seed:#x})"),
+            module,
+            input: Vec::new(),
+            expected,
+        });
+    }
+
+    corpus
+}
+
+/// The engine a volunteer actually runs, checked against Cairn's interpreter.
+///
+/// # Why this is worth a process boundary
+///
+/// Every other engine in this file is Rust, linked into this binary. **None of them is the
+/// engine this project is for.** A volunteer opens a tab and the unit runs on V8 or
+/// SpiderMonkey; until this test existed, that engine was the only one in the system that
+/// nothing compared against anything.
+///
+/// The failure it guards is the project's worst shape. Cairn does not detect a wrong answer, it
+/// detects a *disagreement*, and then decides which party was lying. A browser engine that
+/// disagreed with Cairn's interpreter about some float expression would not be caught
+/// cheating — it would be **convicted** of cheating, in a dispute it had no way to win, for the
+/// offence of running in a browser. Silent, rare, concentrated on whichever engine lost, and
+/// indistinguishable from fraud.
+///
+/// # What runs, and what does not
+///
+/// The corpus goes through `browser/differential.js`, which imports the volunteer's own
+/// `host.js` — the same three host functions and the same fuel reading `worker.js` uses. It is
+/// Node rather than a real browser, so this is V8 without the browser around it; a
+/// headless-browser matrix across V8, SpiderMonkey and JavaScriptCore is the obvious next step
+/// and needs a toolchain the browser worker deliberately does not have.
+///
+/// If `node` is absent the test **skips loudly** rather than passing, so a Rust contributor with
+/// no Node installed can still run `cargo test`. `CAIRN_REQUIRE_NODE=1` turns the skip into a
+/// failure; CI sets it, which is what stops this going quietly vacuous in the one place it must
+/// not.
+#[test]
+fn the_browsers_own_engine_agrees_with_cairn() {
+    if !node_is_available() {
+        assert!(
+            !std::env::var("CAIRN_REQUIRE_NODE").is_ok_and(|required| required == "1"),
+            "CAIRN_REQUIRE_NODE=1 but `node` is not on the path"
+        );
+        println!(
+            "SKIPPED: `node` is not on the path, so the browser's engine was NOT checked. That \
+             is the engine volunteers actually run. Install Node, or set CAIRN_REQUIRE_NODE=1 \
+             to make this a failure."
+        );
+        return;
+    }
+
+    let corpus = browser_corpus();
+    assert!(
+        corpus.len() > 500,
+        "only {} cases reached the browser — the corpus has gone vacuous",
+        corpus.len()
+    );
+
+    let directory = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("browser-differential");
+    // Removed rather than reused: a stale `case-N.wasm` from a run with a different corpus size
+    // would be compared against this run's expectations.
+    let _ = std::fs::remove_dir_all(&directory);
+    std::fs::create_dir_all(&directory).expect("should be able to write under the target dir");
+
+    let mut manifest = String::new();
+    for (index, case) in corpus.iter().enumerate() {
+        std::fs::write(directory.join(format!("case-{index}.wasm")), &case.module)
+            .expect("should be able to write a case");
+        manifest.push_str(&format!("{index}\t{}\n", to_hex(&case.input)));
+    }
+    std::fs::write(directory.join("manifest.tsv"), &manifest).expect("should be able to write");
+
+    let harness = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("browser")
+        .join("differential.js");
+    let run = std::process::Command::new("node")
+        .arg(&harness)
+        .arg(&directory)
+        .output()
+        .expect("node should start");
+    assert!(
+        run.status.success(),
+        "browser/differential.js failed:\n{}\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr),
+    );
+
+    let results = std::fs::read_to_string(directory.join("results.tsv"))
+        .expect("the harness should have written results");
+    let mut checked = 0u32;
+    for line in results.lines().filter(|line| !line.trim().is_empty()) {
+        let mut fields = line.split('\t');
+        let index: usize = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("a result line starts with a case index");
+        let kind = fields.next().expect("a result line says ok or trap");
+        let fuel: u64 = fields
+            .next()
+            .and_then(|field| field.parse().ok())
+            .expect("a result line carries a fuel count");
+        let output = from_hex(fields.next().unwrap_or("")).expect("output should be hex");
+
+        let case = corpus
+            .get(index)
+            .expect("the harness invented a case index");
+        let theirs = Outcome::reference(
+            match kind {
+                "ok" => Some(output),
+                "trap" => None,
+                other => panic!("unknown result kind {other:?}"),
+            },
+            fuel,
+        );
+
+        assert_eq!(
+            case.expected.output.is_some(),
+            theirs.output.is_some(),
+            "{}: cairn and the browser's engine disagree about whether execution trapped",
+            case.name,
+        );
+        assert_eq!(
+            case.expected.fuel, theirs.fuel,
+            "{}: fuel differs against the browser's engine, so it took a different path",
+            case.name,
+        );
+        assert_eq!(
+            case.expected.output, theirs.output,
+            "{}: output differs against the browser's engine",
+            case.name,
+        );
+        checked += 1;
+    }
+
+    assert_eq!(
+        checked as usize,
+        corpus.len(),
+        "the harness reported {checked} of {} cases",
+        corpus.len()
+    );
+    println!(
+        "browser engine: {checked} units agreed with Cairn's interpreter — {}",
+        String::from_utf8_lossy(&run.stdout).trim()
+    );
 }
