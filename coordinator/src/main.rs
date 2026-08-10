@@ -17,13 +17,26 @@
 //! unthinkable and the first two buy nothing until there is a database to be transactional
 //! about. See [ADR-0010](../../docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md).
 //!
+//! # How a disagreement is settled
+//!
+//! Two ways, and which one is used depends on the parties rather than on the coordinator's mood.
+//!
+//! **By bisection**, when both parties declared they can argue. The coordinator asks each of
+//! them what state they claim at a step, `log₂(n)` times, then executes **one instruction** from
+//! a state a party hands over. Nobody re-runs the unit. See [`cairn_coordinator::dispute`].
+//!
+//! **By re-execution**, otherwise. Answering a challenge means producing a state root, and no
+//! engine outside this repository can — a browser volunteer is fast and blind
+//! ([ADR-0005](../../docs/adr/0005-the-fast-path-cannot-snapshot.md)). Challenging one anyway
+//! would time it out and convict an honest volunteer for running in a browser, so the referee
+//! does the work itself instead. **That is a route, not a gap**; see
+//! [ADR-0011](../../docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
+//!
 //! # What this coordinator is not
 //!
-//! No database, no reputation, no canaries, and **no interactive dispute protocol** — a
-//! disagreement is settled by the referee executing the unit once itself, which is correct but
-//! is ordinary replication rather than the bisection this project is about. `grid.rs` says so
-//! where it happens, at length, because that gap is the most quotable thing here and quoting it
-//! wrongly would be worse than the gap.
+//! No database, no reputation, no canaries, and **no penalties** — a verdict distinguishes a
+//! proven lie from an abandonment, and ADR-0001 wants those to cost a volunteer very
+//! differently, but acting on that needs a reputation store that does not exist yet.
 
 use std::sync::{Arc, Mutex};
 

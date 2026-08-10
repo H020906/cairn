@@ -227,22 +227,46 @@ the browser's own engine, reports the answer *and how many instructions it took*
 another. Open a second tab and the two confirm each other's work — units go from `open` to
 `accepted` once a quorum of **different** volunteers agrees.
 
-Feed it a liar and watch it get caught:
+### Watch a liar get bisected, over a network
+
+Start a coordinator that replicates every unit, then two volunteers — one of which lies:
 
 ```bash
-curl -s "http://127.0.0.1:8080/api/lease?worker=liar"
-curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbeefdeadbeef
+cargo run --release -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+  workloads/examples/input-a.bin --replicate 100
 ```
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name honest
+```
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name liar --lie-from 500000
+```
+
+Then read `http://127.0.0.1:8080/api/disputes`:
 
 ```json
-{"state":"settled","verdict":"the second party was wrong","output":"bd3e5cfce4250000"}
+{"state":"settled","by":"bisection","rounds":20,"messages":47,
+ "verdict":"the second party lied about the instruction at step 499999, found in 20 rounds
+            of bisection and proved by executing that one instruction",
+ "output":"bd3e5cfce4250000"}
 ```
 
-**What that verdict is and is not:** the coordinator settled it by executing the unit once
-itself. That is correct, and it is ordinary replication rather than the bisection this project
-is about — the bisection needs the two parties to answer questions over a network, and there is
-no protocol for asking yet. `coordinator/src/grid.rs` says so where it happens, at length,
-because a gap described wrongly is worse than a gap.
+**1,050,030 instructions. 20 rounds. 47 messages. One instruction executed by the coordinator.**
+The two volunteers replayed on their own machines; the honest one handed over the disputed state
+as a proof-carrying witness, and the referee stepped a single instruction to see who was lying.
+Nobody re-ran the unit.
+
+A liar has to lie **twice** — once in the answer, and again in every root it claims afterwards.
+`--lie-from` does both, because lying only once is not cheating: the replay is deterministic, so
+a party that answers challenges honestly reproduces the truth and agrees with everyone.
+
+**And a volunteer that cannot argue is never challenged.** Answering means producing a state root,
+which no browser engine can do. Those disagreements are settled by the referee re-executing the
+unit itself — a route, not a gap, because challenging a volunteer that cannot answer would convict
+it for silence. See
+[ADR-0011](docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
 
 ### Or just the browser worker, with no coordinator
 
@@ -264,7 +288,7 @@ To check the claims on this page rather than take them:
 cargo test --workspace
 ```
 
-237 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
+271 tests, plus twelve more in `node --test browser/policy.test.js`. Among them: an interpreter
 checked instruction-by-instruction against **two** independent WASM engines including a JIT, 300
 randomly generated float expressions and 200 whole generated modules per run, a bisection game
 that converges on a corrupted instruction, and an adjudication that names the liar without
@@ -276,23 +300,23 @@ came out badly.
 Cairn is being built in a deliberately short, fixed window, with a bias toward *narrow and
 finished* over *broad and abandoned*.
 
-**What exists is the verification kernel, two workers, and a coordinator that ties them into a
-system.** What is not here: a database, reputation, canaries, a dashboard, a real scientific
-workload, and — the one that matters most — **the interactive dispute protocol**, without which
-a disagreement is settled by the referee re-executing rather than by bisection. That is stated
+**What exists is the verification kernel, two workers, a coordinator that ties them into a
+system, and the interactive dispute protocol running over it.** What is not here: a database,
+reputation, canaries, penalties, a dashboard, and a real scientific workload. That is stated
 plainly rather than left implied by unticked boxes.
 
 | Milestone | Status |
 |---|---|
 | Repository, CI, architecture decision records | **Done** — CI runs the real determinism gate, not a placeholder |
-| **Deterministic execution kernel + trace commitment** | **Done** — ~11.2k lines of Rust, 237 tests |
+| **Deterministic execution kernel + trace commitment** | **Done** — ~14.7k lines of Rust source, 271 tests |
 | **Interactive bisection arbitration** | **Done** — narrows to one instruction, adjudicates from a state witness, never replays |
 | Benchmarks + maintainer handover | **Done** — and the benchmarks refuted three headline claims; see above |
 | **Native worker** | **Done** — `cairn-worker`, runs a unit on a JIT and settles a dispute end to end |
 | **Browser volunteer** | **Done** — a Web Worker around the page's own engine; no install, no dependencies, no build step |
 | **Coordinator: registration, queue, leases, quorum, referee** | **Done** — Rust, in memory, no database; the system runs end to end |
-| Coordinator: persistence, heartbeats, the interactive dispute protocol | Not started |
-| Verification policy: canaries, reputation | Not started — the replication rate exists, the rest does not |
+| **The interactive dispute protocol, over the network** | **Done** — 1,050,030 instructions settled in 20 rounds and **one** executed instruction |
+| Coordinator: persistence, heartbeats | Not started |
+| Verification policy: canaries, reputation, penalties | Not started — the replication rate exists and verdicts name who lied; nothing acts on it |
 | Dashboard + live globe | Not started |
 | A real scientific workload (molecular docking) | Not started |
 

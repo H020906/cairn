@@ -20,12 +20,27 @@ struct Host {
     fuel: u64,
 }
 
+/// What one execution produced.
+pub struct Executed {
+    /// The bytes the workload wrote through `cairn.output`.
+    pub output: Vec<u8>,
+    /// How much work it was, if the unit was prepared to say.
+    ///
+    /// The interesting half of [ADR-0009]: a module metered through an exported counter runs on
+    /// an engine Cairn does not control and still reports an exact, machine-independent
+    /// instruction count. `None` means the module was not prepared to count, which is the
+    /// default — there is no way to recover the number afterwards and no reason to want one.
+    ///
+    /// [ADR-0009]: ../../docs/adr/0009-metering-through-a-global-the-engines-disagree.md
+    pub fuel: Option<u64>,
+}
+
 /// Compile and run `module` on wasmtime, returning what it wrote through `cairn.output`.
 ///
 /// # Errors
 ///
 /// Any failure to compile, link, instantiate or execute, as a message fit to print.
-pub fn execute(module: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
+pub fn execute(module: &[u8], input: &[u8]) -> Result<Executed, String> {
     let engine = Engine::default();
     let module = Module::new(&engine, module).map_err(|e| format!("could not compile: {e}"))?;
     let mut store = Store::new(
@@ -116,5 +131,17 @@ pub fn execute(module: &[u8], input: &[u8]) -> Result<Vec<u8>, String> {
         .call(&mut store, ())
         .map_err(|e| format!("execution trapped: {e}"))?;
 
-    Ok(std::mem::take(&mut store.data_mut().output))
+    // Two encodings, one number. `Metering::Global` counts into an exported global — free enough
+    // to leave on — and `Metering::HostCall` counts through the import linked above. A module
+    // metered neither way reports nothing, which is not a failure.
+    let counted = instance
+        .get_global(&mut store, validate::FUEL_EXPORT)
+        .and_then(|global| global.get(&mut store).i64())
+        .map(|value| value as u64);
+    let charged = store.data().fuel;
+
+    Ok(Executed {
+        output: std::mem::take(&mut store.data_mut().output),
+        fuel: counted.or((charged > 0).then_some(charged)),
+    })
 }

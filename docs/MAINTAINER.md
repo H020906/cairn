@@ -18,11 +18,16 @@ execution, and when two workers disagree, **binary-search their commitments down
 instruction where they first diverged** and re-execute only that. The mechanism is an
 optimistic rollup's fraud proof, pointed at science instead of finance.
 
-**That mechanism is built, tested and measured, and there is now a system around it** — a
-coordinator, two workers, and a work queue between them. What the system does *not* have is
-the mechanism wired into it: a disagreement is currently settled by the referee re-executing
-the unit, because bisection needs the two parties to answer questions over a network and there
-is no protocol for asking. §3 is precise about that, and so is `coordinator/src/grid.rs`.
+**That mechanism is built, tested, measured, and wired into a running system** — a
+coordinator, two workers, a work queue, and an HTTP protocol over which two parties are bisected
+against each other. Measured end to end: a disagreement about a 1,050,030-instruction execution
+settled in **20 rounds, 47 messages, and one instruction executed by the coordinator**.
+
+There is a second route, and it is not a fallback in the apologetic sense. Answering a challenge
+means producing a state root, and no engine outside this repository can — a browser volunteer is
+fast and blind. Those disagreements are settled by the referee re-executing the unit itself,
+because challenging a volunteer that cannot answer would convict it for silence. §3 is precise
+about which route runs when, and so is `coordinator/src/dispute.rs`.
 
 ---
 
@@ -35,7 +40,7 @@ machine in about two minutes:
 cargo test --workspace
 ```
 
-248 tests. If they are green, the following is true.
+271 tests. If they are green, the following is true.
 
 **You can take an untrusted WebAssembly module and make it deterministic.** `validate.rs`
 rejects anything with a host-dependent escape (threads, SIMD, reference types, any import
@@ -75,13 +80,16 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
 - **No dashboard.** `web/` does not exist. `GET /api/status` is what there is.
 - **The coordinator exists but is not the one ARCHITECTURE originally described.**
   `coordinator/` has registration, a work queue, expiring leases, one-volunteer-one-vote, a
-  replication rate and a referee. It has **no reputation, no canaries, and no interactive
-  dispute protocol** — a disagreement is settled by the referee re-executing the unit, which is
-  correct but is ordinary replication rather than bisection. **That gap is the most quotable
-  thing in the repository**, and `coordinator/src/grid.rs` spends a screen of prose making sure
-  it gets quoted right. Closing it needs a question/answer channel: an endpoint where a party
-  holding an open dispute is asked for `root_at(step)` and answers from a `Replay`.
-  `dispute::resolve` is already generic over `Claimant`, so nothing in `runtime/` changes.
+  replication rate, a referee, and the interactive dispute protocol. It has **no reputation, no
+  canaries and no penalties** — a verdict distinguishes a proven lie from an abandonment, ADR-0001
+  wants those to cost a volunteer very differently, and nothing yet acts on the difference.
+- **Two dispute routes, and mixing them up is the easiest way to misdescribe this project.**
+  Bisection needs *both* parties to have declared they can argue (`Submission::bisects`); a
+  volunteer that cannot produce state roots — every browser — is settled for by re-execution
+  instead. And bisection **convicts liars, not the merely wrong**: both parties replay identical
+  bytes under a deterministic interpreter, so a party whose original answer was wrong for
+  non-adversarial reasons replays honestly, agrees, and is convicted of nothing. See
+  [ADR-0011](adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
 - **No real workload.** The molecular-docking target is an intention;
   `workloads/examples/sum-of-squares.wat` is a demonstration fixture, not science.
 
@@ -348,10 +356,17 @@ the order, but it does mean you have inherited a jewel with no setting.
 clock, and no network. Whatever transport eventually carries it — HTTP, WebSocket, a queue —
 drives the same struct. Do not let transport concerns leak into it.
 
-**The `Claimant` trait is the seam for the coordinator.** When the Java side arrives, its job
-in a dispute is to implement two things: relay rounds between the parties, and call
-`adjudicate` at the end. It never replays the unit. If a design ever requires the coordinator
-to re-execute a work unit to resolve a dispute, that design has thrown away the entire point.
+**The `Claimant` trait is the seam, and it held.** `coordinator/src/dispute.rs` implements it
+as a mailbox that blocks a referee thread until an HTTP handler drops an answer in, and
+`dispute::resolve` needed no change at all to be driven across a network. Whatever transport
+comes next, implement `Claimant` and leave `resolve` alone.
+
+What *did* need new code was the end of the protocol. Bisection narrows to one instruction, and
+somebody must execute it from the state immediately before it — which the coordinator does not
+have and must not compute, because reaching step *n* costs `O(n)`. So a party sends that state
+and `runtime/src/wire.rs` puts it on the wire. **If a design ever requires the coordinator to
+re-execute a work unit to resolve a dispute between two parties who can argue, that design has
+thrown away the entire point.**
 
 **Trust model, stated honestly:** Cairn removes trust from *workers*. The coordinator is
 still fully trusted — it defines canaries, referees disputes, holds results. Removing that is

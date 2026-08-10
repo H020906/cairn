@@ -670,6 +670,176 @@ impl Claimant for Replay<'_> {
     }
 }
 
+// --- the party's side of the wire ---------------------------------------------------------
+
+/// What a coordinator asks a party during a dispute.
+///
+/// The protocol's whole vocabulary. It lives here, next to [`resolve`], rather than in whichever
+/// crate happens to put it on a socket — because **there must be exactly one implementation of
+/// how a party answers**. Two that disagree do not produce a bug report: they convict an honest
+/// volunteer. Every differential test in this repository exists to prevent that, and a
+/// coordinator's test double answering slightly differently from the real worker would put it
+/// back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Question {
+    /// How many instructions did your execution take?
+    ///
+    /// Asked once of each party before bisection can begin. The coordinator does not know how
+    /// long the work was — it never ran it — and [`resolve`] needs a range whose upper end the
+    /// parties disagree at.
+    Length,
+    /// What state root do you claim after this many instructions?
+    ///
+    /// The bisection itself: `log₂(n)` of these settle a dispute of any size.
+    Root {
+        /// The step in question.
+        step: u64,
+    },
+    /// Hand over the machine state at this step, with proofs.
+    ///
+    /// Asked once, at the end, of a party that has already committed to this state's root.
+    /// Fabricating it is pointless — [`adjudicate`] checks it against that root.
+    Witness {
+        /// The step whose state is wanted.
+        step: u64,
+    },
+}
+
+impl Question {
+    /// The wire word for this question.
+    #[must_use]
+    pub const fn kind(self) -> &'static str {
+        match self {
+            Self::Length => "length",
+            Self::Root { .. } => "root",
+            Self::Witness { .. } => "witness",
+        }
+    }
+
+    /// The step it concerns, or `None` for [`Question::Length`].
+    #[must_use]
+    pub const fn step(self) -> Option<u64> {
+        match self {
+            Self::Length => None,
+            Self::Root { step } | Self::Witness { step } => Some(step),
+        }
+    }
+}
+
+/// What a party said back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Answer {
+    /// The party's own execution length.
+    Length(u64),
+    /// A claimed root, or `None` for "my execution had ended by then" — which is an answer, not
+    /// a refusal, and two parties that stop at different points disagree from there.
+    Root(Option<Hash>),
+    /// An encoded [`Witness`], as [`crate::wire`] writes one.
+    Witness(Vec<u8>),
+}
+
+/// Why a party could not answer at all.
+///
+/// Distinct from [`Absent`], which is a party *choosing* not to. These are conditions under
+/// which no party could answer, and they mean the dispute is malformed rather than that somebody
+/// is hiding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Unanswerable {
+    /// A machine could not be built from this image at all.
+    CannotStart(Trap),
+    /// The state at that step could not be put on a wire.
+    CannotEncode(crate::wire::WireError),
+}
+
+impl core::fmt::Display for Unanswerable {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::CannotStart(t) => write!(f, "the disputed module could not be started: {t}"),
+            Self::CannotEncode(e) => write!(f, "the state could not be encoded: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for Unanswerable {}
+
+/// Answer one question the way an honest party does.
+///
+/// `image` must be the **dispute-path** module — the fully instrumented one — and `input` the
+/// unit as assigned. Both parties replaying the same bytes is what makes "step *n*" name a
+/// state; replaying the honest-path binary instead would produce well-formed answers to a
+/// different question.
+///
+/// # Why an honest party cannot be caught out by this
+///
+/// The replay is deterministic, so this reproduces the truth whatever the party's own engine
+/// did earlier. A party that returned a wrong answer and then calls this agrees with everybody
+/// else and is convicted of nothing — see the coordinator's `dispute` module for what happens
+/// then. Only a party that answers with something other than this can be convicted.
+///
+/// # Errors
+///
+/// See [`Unanswerable`].
+pub fn answer(
+    image: &Image<'_>,
+    input: &[u8],
+    limits: Limits,
+    question: Question,
+) -> Result<Answer, Unanswerable> {
+    match question {
+        Question::Length => {
+            let mut machine =
+                Machine::new(image, input.to_vec(), limits).map_err(Unanswerable::CannotStart)?;
+            // A trapped execution still has a length: the steps it managed before trapping. Two
+            // parties whose executions end at different points disagree from the first step past
+            // the earlier one, which is what bisection then finds.
+            let steps = machine
+                .run()
+                .map_or_else(|_| machine.steps(), |trace| trace.steps);
+            Ok(Answer::Length(steps))
+        }
+        Question::Root { step } => {
+            let mut replay = Replay::new(image, input.to_vec(), limits);
+            // `Replay` answers or reports no state; it is never [`Absent`], because absence is a
+            // party declining rather than a computation failing.
+            let root = replay.root_at(Step::new(step)).unwrap_or(None);
+            Ok(Answer::Root(root))
+        }
+        Question::Witness { step } => {
+            let witness = witness_at(image, input, Step::new(step), limits)?;
+            crate::wire::encode(&witness)
+                .map(Answer::Witness)
+                .map_err(Unanswerable::CannotEncode)
+        }
+    }
+}
+
+/// The machine state at `step`, ready for the instruction that follows it.
+///
+/// Costs `O(step)` — this is the one part of a dispute that is linear, and it is paid once, by a
+/// party, not by the coordinator. Stopping early is not an error: a witness of a finished or
+/// trapped machine describes a state with no instruction after it, which is exactly what a party
+/// claiming a state past the end has to be judged against.
+///
+/// # Errors
+///
+/// [`Unanswerable::CannotStart`] if no machine can be built from this image.
+pub fn witness_at(
+    image: &Image<'_>,
+    input: &[u8],
+    step: Step,
+    limits: Limits,
+) -> Result<Witness, Unanswerable> {
+    let mut machine =
+        Machine::new(image, input.to_vec(), limits).map_err(Unanswerable::CannotStart)?;
+    for _ in 0..step.get() {
+        match machine.step() {
+            Ok(Progress::Finished) | Err(_) => break,
+            Ok(_) => {}
+        }
+    }
+    Ok(machine.witness_for_next_step())
+}
+
 #[cfg(test)]
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]

@@ -35,11 +35,17 @@ fn grid_with_one_unit(input: &[u8]) -> (Grid, usize) {
     (grid, unit)
 }
 
+/// An answer from a volunteer that cannot argue about it — a browser, in other words.
+///
+/// The common case, and the reason `bisects` defaults to false everywhere: a volunteer that
+/// executes on the engine it already has cannot produce a state root, so challenging it would
+/// convict it for silence. See `Submission::bisects`.
 fn answer(worker: &str, output: Vec<u8>) -> Submission {
     Submission {
         worker: worker.to_owned(),
         output,
         fuel: None,
+        bisects: false,
     }
 }
 
@@ -117,7 +123,11 @@ fn the_same_worker_is_never_given_the_same_unit_twice() {
 }
 
 #[test]
-fn a_disagreement_names_the_party_that_did_not_execute_the_unit() {
+fn a_disagreement_between_parties_that_cannot_argue_is_settled_by_re_execution() {
+    // The fallback route, and it is a route rather than a gap. Neither of these volunteers can
+    // answer a challenge — that is what `bisects: false` says — so there is nobody to bisect
+    // against and the referee does the work itself. `tests/interactive.rs` covers the other
+    // route, where the parties argue and the referee executes one instruction.
     let mut grid = Grid::new().with_replication(100);
     let id = grid.register("test", WORKLOAD.as_bytes()).unwrap();
     let unit = grid.submit(&id, b"abcde".to_vec()).unwrap();

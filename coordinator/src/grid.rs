@@ -2,7 +2,8 @@
 //!
 //! Every decision Cairn's coordinator makes lives here: which unit to hand a volunteer, what
 //! to do with a result that comes back, and when two results mean a dispute rather than a
-//! coincidence. The HTTP layer in [`crate::api`] does nothing but translate.
+//! coincidence. The HTTP layer in [`crate::api`] does nothing but translate, and the argument
+//! itself is [`crate::dispute`].
 //!
 //! The split is not tidiness. A coordinator is the one component that can convict an honest
 //! volunteer, so its decisions have to be testable without a socket — and everything in this
@@ -20,15 +21,20 @@
 //! a canary rate `c` and a replication rate `r` — and only `r` exists here. Reputation is what
 //! decides *who* gets replicated, and inventing a scoring rule with no real workers to score
 //! would be fiction. The replication rate is a dial with a number in it; the rest is not.
+//!
+//! **Nothing here is a penalty.** [`crate::dispute`] names who lied and who went quiet, and
+//! ADR-0001 says those two should cost a volunteer very differently. Acting on that needs the
+//! reputation store above, so for now a verdict is recorded and read, not applied.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cairn_runtime::canon::{self, Config};
-use cairn_runtime::dispute::Party;
 use cairn_runtime::engine::image;
-use cairn_runtime::engine::machine::{Limits, Machine};
 use cairn_runtime::validate;
+
+use crate::dispute::{self, Dispute};
 
 /// A work unit's identity: the BLAKE3 hash of the canonical module bytes.
 ///
@@ -66,7 +72,10 @@ pub struct Workload {
     ///
     /// Built at registration rather than on demand, because building it is deterministic and
     /// doing it under the pressure of an open dispute is a worse time to discover a problem.
-    pub disputable: Vec<u8>,
+    ///
+    /// Shared rather than owned because a dispute runs on its own thread and needs it for as
+    /// long as the argument lasts.
+    pub disputable: Arc<Vec<u8>>,
     /// Human-readable, for the dashboard that does not exist yet.
     pub name: String,
 }
@@ -101,6 +110,23 @@ pub struct Submission {
     /// [ADR-0009](../../docs/adr/0009-metering-through-a-global-the-engines-disagree.md) made
     /// possible. Making it load-bearing would need it to be part of the disputed state.
     pub fuel: Option<u64>,
+    /// Whether this volunteer can be a party to an interactive dispute.
+    ///
+    /// # Why a volunteer is allowed to say no
+    ///
+    /// Answering a challenge means producing the state root after *n* instructions, and no
+    /// WebAssembly engine outside this repository can — the operand stack and the frame chain
+    /// are not things an embedder gets to read ([ADR-0005]). A browser volunteer executes at
+    /// full speed and cannot say a word about *how* it got there. That is by design, and it is
+    /// most of why this project exists.
+    ///
+    /// So a volunteer declares, and the coordinator believes it. Assuming otherwise and
+    /// challenging a browser would time it out and convict it by default — **an honest
+    /// volunteer convicted for running in a browser**, which is the exact failure this codebase
+    /// is organised to prevent.
+    ///
+    /// [ADR-0005]: ../../docs/adr/0005-the-fast-path-cannot-snapshot.md
+    pub bisects: bool,
 }
 
 /// Where a unit has got to.
@@ -113,12 +139,19 @@ pub enum Outcome {
         /// The answer every volunteer who ran it agreed on.
         output: Vec<u8>,
     },
-    /// Two volunteers disagreed and the referee decided between them.
+    /// Two volunteers disagreed and are arguing about it. The argument may still be running.
+    ///
+    /// Its state lives in a [`Dispute`]; fetch it with [`Grid::dispute`]. It is not copied in
+    /// here because a dispute is a *process* whose transcript grows, and a snapshot of one
+    /// stored in the unit would be stale the moment it was taken.
+    Disputed {
+        /// Index into the grid's disputes.
+        dispute: usize,
+    },
+    /// Two volunteers disagreed and the referee settled it by re-executing the unit itself.
+    ///
+    /// The fallback route, taken when the parties cannot argue — see [`Submission::bisects`].
     Settled {
-        /// The instruction where their executions first differed.
-        divergence: u64,
-        /// Messages the bisection took.
-        rounds: u32,
         /// What the referee concluded, in words, including how it concluded it.
         verdict: String,
         /// The answer, when the referee could establish one.
@@ -155,8 +188,10 @@ impl core::fmt::Display for Refusal {
 pub struct Grid {
     workloads: HashMap<UnitId, Workload>,
     units: Vec<Unit>,
+    disputes: Vec<Arc<Dispute>>,
     replication_percent: u32,
     lease: Duration,
+    patience: Duration,
 }
 
 impl Default for Grid {
@@ -172,8 +207,10 @@ impl Grid {
         Self {
             workloads: HashMap::new(),
             units: Vec::new(),
+            disputes: Vec::new(),
             replication_percent: DEFAULT_REPLICATION_PERCENT,
             lease: DEFAULT_LEASE,
+            patience: dispute::DEFAULT_PATIENCE,
         }
     }
 
@@ -188,6 +225,16 @@ impl Grid {
     #[must_use]
     pub const fn with_lease(mut self, lease: Duration) -> Self {
         self.lease = lease;
+        self
+    }
+
+    /// How long a party to a dispute has to answer one question.
+    ///
+    /// Tests want milliseconds; a real network wants a minute, because an answer costs an
+    /// interpreted replay. See [`dispute::DEFAULT_PATIENCE`].
+    #[must_use]
+    pub const fn with_patience(mut self, patience: Duration) -> Self {
+        self.patience = patience;
         self
     }
 
@@ -224,9 +271,14 @@ impl Grid {
         )
         .map_err(|e| format!("could not instrument: {e}"))?;
 
-        // What both parties re-run if somebody disputes: everything.
-        let disputable = canon::instrument(&source, Config::dispute_path())
-            .map_err(|e| format!("could not instrument for dispute: {e}"))?;
+        // What both parties re-run if somebody disputes: everything. A *different program* from
+        // the one above, with different instruction counts — which is why a dispute has to name
+        // which of the two it is about, and why the parties are handed these bytes rather than
+        // the ones they ran.
+        let disputable = Arc::new(
+            canon::instrument(&source, Config::dispute_path())
+                .map_err(|e| format!("could not instrument for dispute: {e}"))?,
+        );
 
         let id = blake3::hash(&module).to_hex().to_string();
         self.workloads.insert(
@@ -281,6 +333,30 @@ impl Grid {
     #[must_use]
     pub fn units(&self) -> &[Unit] {
         &self.units
+    }
+
+    /// One dispute by index.
+    #[must_use]
+    pub fn dispute(&self, index: usize) -> Option<&Arc<Dispute>> {
+        self.disputes.get(index)
+    }
+
+    /// Every dispute opened so far, running or finished.
+    #[must_use]
+    pub fn disputes(&self) -> &[Arc<Dispute>] {
+        &self.disputes
+    }
+
+    /// The dispute this worker is a party to, if it is a party to one that is still running.
+    ///
+    /// What a polling volunteer asks. Scanning is fine at this scale and keeps a worker from
+    /// having to remember anything: a volunteer's entire state is its name.
+    #[must_use]
+    pub fn dispute_for(&self, worker: &str) -> Option<(usize, &Arc<Dispute>)> {
+        self.disputes
+            .iter()
+            .enumerate()
+            .find(|(_, d)| !d.is_finished() && d.desk_for(worker).is_some())
     }
 
     /// Hand a volunteer something to do, or `None` if there is nothing.
@@ -366,17 +442,69 @@ impl Grid {
                 output: first.output,
             },
             Some(second) => {
-                let workload = self
-                    .workloads
-                    .get(&workload_id)
-                    .ok_or(Refusal::UnknownUnit)?;
-                settle(&workload.disputable, &input, &first, &second)
+                let disputable = Arc::clone(
+                    &self
+                        .workloads
+                        .get(&workload_id)
+                        .ok_or(Refusal::UnknownUnit)?
+                        .disputable,
+                );
+                self.disagree(index, &workload_id, disputable, input, first, second)
             }
         };
 
         let unit = self.units.get_mut(index).ok_or(Refusal::UnknownUnit)?;
         unit.outcome = outcome.clone();
         Ok(outcome)
+    }
+
+    /// Two volunteers returned different answers. Choose how to settle it.
+    ///
+    /// # The one decision in this file that is not bookkeeping
+    ///
+    /// Bisection is an *interactive* protocol: it works by asking the two parties what state
+    /// they claim at a step, and they answer by replaying on their own machines. A party that
+    /// cannot replay under Cairn's interpreter cannot answer, and a browser volunteer cannot —
+    /// [ADR-0005] is the finding that no host engine will ever expose the state a root covers.
+    ///
+    /// Challenging such a party anyway would time it out and convict it by default. So the
+    /// interactive route is taken only when **both** parties declared they can argue, and
+    /// otherwise the referee does the work itself. The fallback is not a stopgap; it is what
+    /// honours a volunteer that is fast and blind, which is the volunteer this project is for.
+    ///
+    /// [ADR-0005]: ../../docs/adr/0005-the-fast-path-cannot-snapshot.md
+    fn disagree(
+        &mut self,
+        unit: usize,
+        workload: &str,
+        disputable: Arc<Vec<u8>>,
+        input: Vec<u8>,
+        first: Submission,
+        second: Submission,
+    ) -> Outcome {
+        if first.bisects && second.bisects {
+            let index = self.disputes.len();
+            self.disputes.push(dispute::open(
+                unit,
+                workload.to_owned(),
+                [first.worker, second.worker],
+                [first.output, second.output],
+                disputable,
+                input,
+                self.patience,
+            ));
+            return Outcome::Disputed { dispute: index };
+        }
+
+        let Ok(image) = image::decode(&disputable) else {
+            return Outcome::Settled {
+                verdict: "the disputed module could not be decoded".to_owned(),
+                output: None,
+            };
+        };
+        let (verdict, output) =
+            dispute::by_re_execution(&image, &input, &[first.output, second.output]);
+        Outcome::Settled { verdict, output }
     }
 }
 
@@ -389,82 +517,4 @@ pub struct Assignment {
     pub workload: UnitId,
     /// The input to run it on.
     pub input: Vec<u8>,
-}
-
-/// Settle a disagreement.
-///
-/// # Read this before quoting anything about how disputes are resolved here
-///
-/// **This is the fallback, not the mechanism.** The referee executes the unit once itself and
-/// names whichever party disagrees with what it got. That is ordinary replication, done by the
-/// coordinator instead of by a third volunteer, and it costs a full execution.
-///
-/// The mechanism — bisect to one instruction and execute *that* — is built, tested and
-/// demonstrable (`cargo run --example dispute`), and it is **not reachable from here**, for a
-/// reason worth being exact about rather than papering over:
-///
-/// > Bisection is an *interactive* protocol. It works by asking **the two parties** what state
-/// > they claim at a given step, and they answer by re-executing on their own machines. The
-/// > coordinator never re-executes anything, which is the entire point. There is no wire
-/// > protocol for asking yet, so there is nobody to ask.
-///
-/// Replaying both sides locally and calling the result an arbitration would be worse than this
-/// fallback: it would look like the mechanism working while actually being the coordinator
-/// doing both parties' work — the exact cost the design exists to avoid, dressed up as its
-/// avoidance. So it does the honest cheap thing and says which one it did.
-///
-/// **What it takes to close the gap** is a question/answer channel: an endpoint where a worker
-/// holding an open dispute is asked for `root_at(step)` and answers from a `Replay`. That is an
-/// `impl Claimant` over HTTP and a polling loop in the worker. `dispute::resolve` is already
-/// generic over `Claimant`, so nothing in `runtime/` changes.
-///
-/// Until then, this fallback is honest and it is also *correct* — the party disagreeing with a
-/// faithful execution of the assigned unit is wrong. What it is not is cheap, and its cost
-/// grows with the execution, which is precisely what bisection fixes.
-fn settle(disputable: &[u8], input: &[u8], first: &Submission, second: &Submission) -> Outcome {
-    let Ok(image) = image::decode(disputable) else {
-        return Outcome::Settled {
-            divergence: 0,
-            rounds: 0,
-            verdict: "the disputed module could not be decoded".to_owned(),
-            output: None,
-        };
-    };
-
-    // The coordinator holds the unit's input as assigned, so it knows what the answer was
-    // supposed to be. Judging against anything else produces a well-formed verdict for a
-    // different question, which is a mistake worth remembering because it looks like an answer.
-    let Some(truth) = honest_output(&image, input) else {
-        return Outcome::Settled {
-            divergence: 0,
-            rounds: 0,
-            verdict: "the unit could not be executed for adjudication".to_owned(),
-            output: None,
-        };
-    };
-
-    let verdict = match (first.output == truth, second.output == truth) {
-        (true, false) => format!("the {} was wrong", Party::Second),
-        (false, true) => format!("the {} was wrong", Party::First),
-        (false, false) => "neither party's result matches the unit as assigned".to_owned(),
-        // Unreachable: they were only routed here because their outputs differ, so they cannot
-        // both equal the same bytes. Kept because a silent misbehaviour here would decide a
-        // dispute rather than fail.
-        (true, true) => {
-            "inconsistent — both results match, so this was not a disagreement".to_owned()
-        }
-    };
-
-    Outcome::Settled {
-        divergence: 0,
-        rounds: 0,
-        verdict: format!("{verdict} (settled by re-execution; see `settle` in grid.rs)"),
-        output: Some(truth),
-    }
-}
-
-/// Execute the unit as assigned, for the answer the referee is prepared to stand behind.
-fn honest_output(image: &image::Image<'_>, input: &[u8]) -> Option<Vec<u8>> {
-    let mut machine = Machine::new(image, input.to_vec(), Limits::default()).ok()?;
-    machine.run().ok().map(|trace| trace.output)
 }

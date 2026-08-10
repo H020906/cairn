@@ -3,6 +3,21 @@
 - **Status:** Accepted
 - **Date:** 2026-08-10
 - **Corrects in part:** [ADR-0002](0002-language-boundaries.md)
+- **Corrected in part by:** [ADR-0011](0011-a-volunteer-that-cannot-argue-is-not-challenged.md)
+
+> **Correction (2026-08-10, same day).** This ADR's language decision stands unchanged. Two of
+> its remarks about the *dispute protocol* do not:
+>
+> 1. It called the re-execution fallback a **gap** awaiting a wire protocol. The wire protocol
+>    now exists, and the fallback turned out to be a permanent, principled route rather than a
+>    placeholder: a volunteer that cannot produce state roots — every browser, by
+>    [ADR-0005](0005-the-fast-path-cannot-snapshot.md) — cannot be a party to a bisection, and
+>    challenging one anyway would convict it for silence.
+> 2. It repeated that closing the gap needed **"nothing in `runtime/`"**. Wrong: the disputed
+>    state has to cross the wire and nothing could encode a `Witness`. `resolve` itself is
+>    genuinely untouched, which was the half that mattered.
+>
+> See [ADR-0011](0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
 
 ## Context
 

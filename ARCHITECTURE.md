@@ -257,10 +257,20 @@ code; the third is unthinkable and the other two buy nothing until there is a da
 transactional about. See [ADR-0010](docs/adr/0010-the-referee-executes-so-the-coordinator-is-rust.md).
 
 What it has: registration through the admission gate, a work queue, leases that expire,
-one-volunteer-one-vote, a replication rate, and a referee. What it does not have: **a database,
-reputation, canaries, and the interactive dispute protocol.** A disagreement is settled by the
-referee executing the unit once itself — correct, but ordinary replication rather than
-bisection, and `grid.rs` says so at length where it happens.
+one-volunteer-one-vote, a replication rate, a referee, and **the interactive dispute protocol** —
+`GET`/`POST /api/challenge`, over which two parties are bisected against each other while the
+coordinator executes exactly one instruction.
+
+**Two routes, chosen by the parties rather than by the coordinator.** Answering a challenge means
+producing a state root, which no engine outside this repository can do — a browser volunteer is
+fast and blind ([ADR-0005](docs/adr/0005-the-fast-path-cannot-snapshot.md)). So a submission
+declares `bisects`; bisection needs both parties to have declared it, and otherwise the referee
+re-executes the unit itself. That fallback is a **route, not a gap**: challenging a volunteer that
+cannot answer would convict it for silence. See
+[ADR-0011](docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
+
+What it does not have: **a database, reputation, canaries, and penalties.** A verdict names who
+lied and who went quiet; nothing yet acts on the difference.
 
 ### `server/` — Java 21 / Spring Boot 3 · **superseded for now**
 The coordinator this describes is what Cairn wants when it has a database, transactions and

@@ -41,16 +41,19 @@ use cairn_runtime::engine::image;
 use cairn_runtime::engine::machine::{Limits, Machine};
 use cairn_runtime::validate;
 
+mod client;
 mod host;
+mod volunteer;
 
 const USAGE: &str = "\
 cairn-worker — run a Cairn work unit, or settle a disagreement about one
 
 USAGE
-    cairn-worker run     <module> [input-file]
-    cairn-worker trace   <module> [input-file]
-    cairn-worker dispute <module> <assigned-input> <claimed-input>
-    cairn-worker prepare <module> <output.wasm> [--count-fuel]
+    cairn-worker run       <module> [input-file]
+    cairn-worker trace     <module> [input-file]
+    cairn-worker dispute   <module> <assigned-input> <claimed-input>
+    cairn-worker prepare   <module> <output.wasm> [--count-fuel]
+    cairn-worker volunteer <coordinator-url> [--name NAME] [--idle-exit N] [--lie-from STEP]
 
     <module> is a .wasm binary or a .wat text module.
     An omitted input file means an empty input.
@@ -80,6 +83,20 @@ WHAT EACH ONE DOES
               the verdict is decided against. <claimed-input> stands in for a party who
               returned an execution that is not that one — a liar, or bad hardware. The
               protocol cannot tell those apart and neither can this.
+
+    volunteer Joins a running coordinator: takes units, executes them on wasmtime, reports the
+              answers, and — unlike a browser volunteer — answers challenges about them
+              afterwards. That is the whole reason this mode exists. Only a party that can
+              replay under Cairn's interpreter can be bisected against, so a network with
+              arguing volunteers settles a disagreement in ~log2(n) messages rather than by
+              re-executing the unit. See docs/adr/0011.
+
+              --idle-exit N  stop after N consecutive polls with nothing to do
+              --lie-from S   return a wrong answer AND defend it with corrupted roots from
+                             step S. A liar has to lie twice: an honest replay reproduces the
+                             truth whatever the volunteer originally returned, so a party that
+                             lies only once is not convicted, it is merely wrong. For the demo
+                             in docs/WALKTHROUGH.md.
 ";
 
 fn main() -> ExitCode {
@@ -98,6 +115,7 @@ fn main() -> ExitCode {
         ["dispute", module, first, second] => settle(module, first, second),
         ["prepare", module, out] => publish(module, out, false),
         ["prepare", module, out, "--count-fuel"] => publish(module, out, true),
+        ["volunteer", base, rest @ ..] => enlist(base, rest),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::FAILURE;
@@ -228,7 +246,7 @@ fn run(module: &str, input: Option<&str>) -> Result<(), String> {
     let input = read_input(input)?;
 
     let started = Instant::now();
-    let output = host::execute(&prepared.bytes, &input)?;
+    let executed = host::execute(&prepared.bytes, &input)?;
     let elapsed = started.elapsed();
 
     println!("engine        wasmtime (compiled)");
@@ -237,9 +255,50 @@ fn run(module: &str, input: Option<&str>) -> Result<(), String> {
         prepared.describe("honest path — determinism only")
     );
     println!("time          {elapsed:.1?}");
-    println!("result        {} bytes", output.len());
-    println!("              {}", hex(&output));
+    if let Some(fuel) = executed.fuel {
+        println!("cost          {fuel} instructions");
+    }
+    println!("result        {} bytes", executed.output.len());
+    println!("              {}", hex(&executed.output));
     Ok(())
+}
+
+/// Join a running coordinator as a volunteer that can also be a party to a dispute.
+fn enlist(base: &str, flags: &[&str]) -> Result<(), String> {
+    let mut name = format!("native-{}", std::process::id());
+    let mut idle_exit = None;
+    let mut lies_from = None;
+
+    let mut rest = flags.iter();
+    while let Some(flag) = rest.next() {
+        match *flag {
+            "--name" => name = (*rest.next().ok_or("--name needs a value")?).to_owned(),
+            "--idle-exit" => {
+                idle_exit = Some(
+                    rest.next()
+                        .ok_or("--idle-exit needs a count")?
+                        .parse()
+                        .map_err(|_| "--idle-exit needs a number")?,
+                );
+            }
+            "--lie-from" => {
+                lies_from = Some(
+                    rest.next()
+                        .ok_or("--lie-from needs a step")?
+                        .parse()
+                        .map_err(|_| "--lie-from needs a number")?,
+                );
+            }
+            other => return Err(format!("unknown flag {other}")),
+        }
+    }
+
+    volunteer::serve(&volunteer::Volunteer {
+        base,
+        name: &name,
+        lies_from,
+        idle_exit,
+    })
 }
 
 /// Produce a commitment to how the unit executed. The dispute path, on the interpreter.

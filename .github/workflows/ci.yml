@@ -94,7 +94,27 @@ jobs:
         # load-bearing one: a worker is never given the same unit twice, because a quorum of two
         # means two *independent* executions and a unit replicated back to the same machine
         # would agree with itself however broken that machine was.
-        run: cargo test -p cairn-coordinator
+        run: cargo test -p cairn-coordinator --test grid
+
+      - name: The interactive dispute protocol, end to end
+        # The project's central claim, exercised rather than described: two parties who disagree
+        # about a few-thousand-instruction execution settle it in ~12 messages and ONE executed
+        # instruction, with nobody re-running the unit. Released rather than debug because the
+        # parties answer by replaying under Cairn's interpreter, and a debug interpreter turns a
+        # six-second test into a minute.
+        #
+        # Two of these guard the ways an honest volunteer could be convicted by accident: a
+        # party that cannot produce state roots is never challenged, and "not your turn" is
+        # distinguishable from "nothing to do" — a party that confuses them abandons a dispute
+        # it was winning. Both were found by running it. See docs/adr/0011.
+        run: cargo test -p cairn-coordinator --release --test interactive
+
+      - name: A state witness survives a hostile wire
+        # `wire.rs` decodes bytes sent by a party with a direct interest in the outcome, so it
+        # is held to `validate.rs`'s standard: never panic, never allocate on a stranger's
+        # say-so, never hang. Every prefix of a valid encoding, every length prefix overwritten
+        # with u32::MAX, and 2,000 pseudo-random bodies.
+        run: cargo test -p cairn-runtime --lib wire
 
       - name: The worked example still works
         # `cargo run --example dispute` is the ten-minute version of this project, and a

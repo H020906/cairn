@@ -21,6 +21,7 @@ done this way?"*
 | [0008](0008-a-dispute-costs-an-interpreted-re-execution.md) | A dispute costs the parties an interpreted re-execution | Accepted |
 | [0009](0009-metering-through-a-global-the-engines-disagree.md) | Metering through a global: the two engines want opposite things | Accepted |
 | [0010](0010-the-referee-executes-so-the-coordinator-is-rust.md) | The referee executes, so the coordinator is Rust | Accepted, corrects 0002 in part |
+| [0011](0011-a-volunteer-that-cannot-argue-is-not-challenged.md) | A volunteer that cannot argue is not challenged | Accepted, corrects 0010 in part |
 
 ## Reading order
 
@@ -58,8 +59,14 @@ and replaces it with the number that does matter: a dispute costs each party an 
 re-execution, and the interpreter is 37×–142× slower than the JIT they ran the work on. That
 turns the dispute *rate* into a budget with an actual figure in it.
 
+Then **0010 and 0011** together, which are about the coordinator. 0010 found that the referee
+*executes*, so it cannot be the Java service ADR-0002 planned. 0011 built the interactive dispute
+protocol 0010 said was missing, and came back with four things that were only visible from
+inside it — including that the fallback 0010 called a gap is not one.
+
 If you read only two of these, read 0005 and 0008 — the two places where the project asked
-"but who is actually doing this?" and got an unwelcome answer.
+"but who is actually doing this?" and got an unwelcome answer. 0011's Finding 2 is the same
+question asked a third time, about the volunteer this project is supposed to be for.
 
 ## Format
 

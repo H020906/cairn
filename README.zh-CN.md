@@ -211,21 +211,44 @@ cargo run -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
 把答案**和它花了多少条指令**报回去，然后再要一个。再开一个标签页，两个志愿者就会互相确认——
 一个单元要等**不同的**志愿者达成共识，才会从 `open` 变成 `accepted`。
 
-喂它一个说谎者，看它被抓：
+### 隔着网络，看一个说谎者被二分出来
+
+先起一个把每个单元都复算一遍的协调器，再起两个志愿者，其中一个说谎：
 
 ```bash
-curl -s "http://127.0.0.1:8080/api/lease?worker=liar"
-curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbeefdeadbeef
+cargo run --release -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+  workloads/examples/input-a.bin --replicate 100
 ```
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name honest
+```
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name liar --lie-from 500000
+```
+
+然后读 `http://127.0.0.1:8080/api/disputes`：
 
 ```json
-{"state":"settled","verdict":"the second party was wrong","output":"bd3e5cfce4250000"}
+{"state":"settled","by":"bisection","rounds":20,"messages":47,
+ "verdict":"the second party lied about the instruction at step 499999, found in 20 rounds
+            of bisection and proved by executing that one instruction",
+ "output":"bd3e5cfce4250000"}
 ```
 
-**这个判决是什么、不是什么**：协调器是**自己把这个单元跑了一遍**来定的。这是对的，但它是普通的
-冗余复算，**不是**这个项目讲的那套二分——二分需要争议双方隔着网络回答提问，而"怎么问"这个协议
-还不存在。`coordinator/src/grid.rs` 在发生这件事的地方长篇写明了这一点，因为**把缺口描述错，
-比缺口本身更糟**。
+**1,050,030 条指令。20 轮。47 条消息。协调器执行了 1 条指令。** 两个志愿者各自在自己的机器上
+重放；诚实的那一方把有争议的那个状态连同证明一起交了上来，裁判走了一步，就看出谁在撒谎。
+**没有任何人重跑那个单元。**
+
+说谎者必须**撒两次谎**——一次在答案里，之后在它声称的每一个状态根里再撒一次。`--lie-from`
+两件都干，因为只撒一次算不上作弊：重放是确定性的，所以一个如实回答挑战的人会还原出真相，
+和所有人一致。
+
+**而不能争论的志愿者，绝不会被挑战。** 回答挑战意味着要给出状态根，浏览器引擎做不到。那类
+分歧由裁判自己重新执行来定——这是一条**路径，不是缺口**，因为去挑战一个答不了的志愿者，
+等于因为它沉默而给它定罪。见
+[ADR-0011](docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md)。
 
 ### 或者只跑浏览器 worker，不带协调器
 
@@ -245,7 +268,7 @@ node browser/server.js
 cargo test --workspace
 ```
 
-237 个测试，另外 `node --test browser/policy.test.js` 还有 12 个。其中包括：一个逐指令对照
+271 个测试，另外 `node --test browser/policy.test.js` 还有 12 个。其中包括：一个逐指令对照
 **两个**独立 WASM 引擎（含一个 JIT）检查过的解释器、每次运行 300 个随机生成的浮点表达式和
 200 个整模块、一场收敛到被篡改指令上的二分游戏，以及一次不重放任务就点出说谎者的裁决。
 然后 `cargo bench` 会重新生成上面那些数字，包括结果很难看的那些。
@@ -255,19 +278,19 @@ cargo test --workspace
 Cairn 是在一个刻意压短、写死的时间窗里建的，取向是**窄而完成**，而不是**宽而烂尾**。
 
 **存在的是验证内核、两个 worker，以及一个把它们串成系统的协调器。** 不在这里的：数据库、信誉、
-诱饵任务、面板、真实科学负载，以及最要紧的那一个——**交互式争议协议**。没有它，一次分歧是靠
-裁判重新执行来定的，而不是靠二分。这一点被直说出来，而不是靠没打勾的复选框暗示。
+诱饵任务、惩罚机制、面板，以及真实科学负载。这一点被直说出来，而不是靠没打勾的复选框暗示。
 
 | 里程碑 | 状态 |
 |---|---|
 | 仓库、CI、架构决策记录 | **完成**——CI 跑的是真正的确定性门禁，不是占位符 |
-| **确定性执行内核 + 轨迹承诺** | **完成**——约 11,200 行 Rust，237 个测试 |
+| **确定性执行内核 + 轨迹承诺** | **完成**——约 14,700 行 Rust 源码，271 个测试 |
 | **交互式二分仲裁** | **完成**——收敛到一条指令，从状态见证裁决，从不重放 |
 | 基准测试 + 维护者交接 | **完成**——而且基准推翻了三条头条主张；见上文 |
 | **原生 worker** | **完成**——`cairn-worker`，在 JIT 上跑一个单元，并端到端了结一场争议 |
 | **浏览器志愿者** | **完成**——包在页面自身引擎外面的 Web Worker；零安装、零依赖、零构建 |
 | **协调器：注册、队列、租约、法定人数、裁判** | **完成**——Rust，内存态，无数据库；系统端到端跑得通 |
-| 协调器：持久化、心跳、交互式争议协议 | 未开始 |
+| **交互式争议协议，跑在网络上** | **完成**——1,050,030 条指令的分歧，20 轮、协调器执行 **1** 条指令 |
+| 协调器：持久化、心跳 | 未开始 |
 | 验证策略：诱饵、信誉 | 未开始——复算率有了，其余没有 |
 | 面板 + 实时地球仪 | 未开始 |
 | 一个真实的科学负载（分子对接） | 未开始 |

@@ -171,13 +171,61 @@ curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbee
 ```
 
 ```json
-{"state":"settled","verdict":"the second party was wrong","output":"bd3e5cfce4250000"}
+{"state":"settled","by":"re-execution","verdict":"the second party was wrong ...","output":"bd3e5cfce4250000"}
 ```
 
-**Read that verdict carefully, because it is not the mechanism.** The coordinator settled it by
-executing the unit once itself. Correct, but ordinary replication — the bisection needs the two
-parties to answer questions over a network, and there is no protocol for asking yet.
-`coordinator/src/grid.rs` says exactly that, where it happens.
+**Read `"by"`, because there are two routes and they cost very different things.** `curl` did not
+declare that it can argue, so this one was settled by the referee executing the unit itself. That
+is a route rather than a gap: answering a challenge means producing a state root, and no browser
+engine can, so challenging a volunteer that cannot answer would convict it for silence
+([ADR-0011](adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md)).
+
+## 5b · The same dispute, bisected instead
+
+Two volunteers that *can* argue. Start the coordinator so every unit is replicated:
+
+```bash
+cargo run --release -p cairn-coordinator -- workloads/examples/sum-of-squares.wat \
+  workloads/examples/input-a.bin --replicate 100
+```
+
+Then, in two more terminals:
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name honest
+```
+
+```bash
+cargo run --release -p cairn-worker -- volunteer http://127.0.0.1:8080 --name liar --lie-from 500000
+```
+
+The liar's terminal shows the bisection converging on it, one question at a time:
+
+```
+challenge     root at step 525015 — answered in 65.4µs (accepted)
+challenge     root at step 262507 — answered in 35.8µs (accepted)
+...
+challenge     root at step 499999 — answered in 219.2µs (accepted)
+challenge     root at step 500000 — answered in 191.0µs (accepted)
+```
+
+and `http://127.0.0.1:8080/api/disputes` ends with:
+
+```json
+{"rounds":20,"messages":47,
+ "conclusion":"the second party lied about the instruction at step 499999, found in 20 rounds
+               of bisection and proved by executing that one instruction"}
+```
+
+**1,050,030 instructions. 47 messages. One instruction executed by the coordinator.** The honest
+party supplied the disputed state as a proof-carrying witness — 10.4 ms — and the referee stepped
+a single instruction to see which of the two claims about it was true. Nobody re-ran the unit.
+
+Note `--lie-from`: **a liar has to lie twice.** The wrong answer starts the dispute; corrupting
+the roots afterwards is what makes it convictable. A party that returns a wrong answer and then
+replays honestly agrees with everybody — the replay is deterministic — so it is not caught by
+bisection at all. It is merely wrong, and the re-execution route names it. Both outcomes are
+correct; only one of them is cheap.
 
 ## 6 · Just the browser worker, with no coordinator
 
@@ -209,7 +257,7 @@ small unit is not a measurement. **What this page demonstrates is agreement, not
 ## Checking the claims instead of believing them
 
 ```bash
-cargo test --workspace        # 237 tests
+cargo test --workspace        # 271 tests
 cargo bench                   # regenerates docs/benchmarks.md
 ```
 

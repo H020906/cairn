@@ -43,6 +43,12 @@
 //!   engine and snapshots at `2^k` boundaries; `slow` is a fully instrumented interpreter
 //!   able to execute a single instruction in isolation from a committed state. Currently
 //!   holds [`engine::image`], the decoder both paths share.
+//!
+//! - [`dispute`] — the bisection, the parties that answer it, and the adjudicator that
+//!   executes the one disputed instruction.
+//! - [`wire`] — the state witness on a wire. A dispute is settled from a state the coordinator
+//!   does not have and must not compute, so a party sends it; this is the format, and the
+//!   decoder assumes the sender is hostile.
 
 pub mod canon;
 pub mod dispute;
@@ -51,3 +57,4 @@ pub mod fuel;
 pub mod merkle;
 pub mod state;
 pub mod validate;
+pub mod wire;
