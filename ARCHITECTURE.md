@@ -317,6 +317,13 @@ Real science, compiled to WASM. The first target is molecular docking for virtua
 screening: one compound per work unit, embarrassingly parallel, deterministic, and
 genuinely useful.
 
+`workloads/rust/cairn-math` is the piece that had to exist first. WebAssembly has no `exp`,
+no `log` and no `sin`, and a workload may not import them from the host — V8 and the platform
+libm disagree on the bits of **every one** of twelve such functions, which under Cairn's rules
+would convict honest volunteers rather than merely round differently
+([ADR-0016](docs/adr/0016-math-belongs-in-the-module-not-the-host.md)). So the math is
+compiled into the module, out of nothing but the arithmetic the specification pins down.
+
 ---
 
 ## 5. Data stores

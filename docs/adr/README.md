@@ -26,6 +26,7 @@ done this way?"*
 | [0013](0013-a-volunteer-computes-its-own-parallelism.md) | A volunteer computes its own parallelism, and reports under one name | Accepted |
 | [0014](0014-the-coordinator-keeps-a-log-not-a-database.md) | The coordinator keeps a log, not a database | Accepted, amends 0002 |
 | [0015](0015-canaries-are-what-catch-a-cheat.md) | Canaries are what catch a cheat, and they are grounded in replication | Accepted, completes 0001 |
+| [0016](0016-math-belongs-in-the-module-not-the-host.md) | Math belongs in the module, not the host | Accepted, extends 0003 |
 
 ## Reading order
 
@@ -99,6 +100,18 @@ terms: canaries must be copied from *corroborated* units, corroboration comes fr
 `r = 0` silently turns canaries off. That was found by a test which showed the naive version
 laundering a cheat's answer into ground truth and then convicting honest volunteers for being
 right.
+
+Finally **0016**, which asks where a workload's `exp` comes from and finds that the obvious
+answer — import it from the host — would have made the grid convict honest volunteers on close
+to one `cbrt` call in three. It belongs with 0003 and 0006 as the third instalment of the same
+argument: the first two secured the arithmetic WebAssembly specifies, and this one covers the
+arithmetic it does not.
+
+It also contains the most alarming single measurement in this repository, and it was not the one
+being looked for. For the worst-case argument in the format, the platform's own `sin` returns
+`-0.2227` where the answer is `1.0` — confirmed by exact integer arithmetic over a 3000-bit `pi`,
+by V8, and by this project's library, all three agreeing against it. Host math is not only
+inconsistent between hosts; it is not dependably correct on any of them.
 
 ## Format
 

@@ -179,6 +179,52 @@ platform is doing something on your behalf that you might otherwise be surprised
 because if you are writing numerical code you should know that **the guarantee is bit-exact
 agreement, not IEEE-754 reproducibility with any particular other system.**
 
+### `exp`, `log`, `sin` — you must bring your own, and there is one to bring
+
+WebAssembly has no transcendental functions, and Cairn will not give you any. The only
+importable module is `cairn` and it has three functions, none of them arithmetic. So a workload
+that needs `exp` has to compile one into itself.
+
+That is not a limitation anybody chose for tidiness. Twenty thousand inputs, twelve functions,
+V8 against the platform libm this repository's tests run on — the figure is how often the two
+returned **different bits**:
+
+| function | disagree | | function | disagree |
+|---|---|---|---|---|
+| `cbrt` | **29.80%** | | `exp` | 7.41% |
+| `sinh` | **17.82%** | | `tan` | 3.63% |
+| `tanh` | **13.77%** | | `ln` | 3.52% |
+| `log10` | **8.98%** | | `cos` | 2.54% |
+
+Twelve functions, twelve disagreements. The gaps are a unit or two in the last place, which is
+beneath notice in ordinary numerical work and fatal here: Cairn does not compare answers for
+closeness, it bisects to the instruction where two workers diverged and rules against one of
+them. A host-imported `cbrt` would put two honest volunteers on opposite sides of a dispute
+roughly one call in three.
+
+**[`workloads/rust/cairn-math`](../workloads/rust/cairn-math) is a library you can link
+against.** Twenty-six functions — `exp`, `exp2`, `expm1`, `ln`, `log2`, `log10`, `ln_1p`, `pow`,
+`sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `sqrt`, `cbrt`,
+`hypot`, `fmod`, `floor`, `ceil`, `round`, `trunc` — no dependencies, built from nothing but the
+arithmetic WebAssembly specifies exactly. It agrees with the platform libm to one or two units
+in the last place across 200,000 samples per function, and `runtime/tests/differential.rs` runs
+it through four engines and requires **identical** bytes.
+
+You are not obliged to use it. If you bring your own math, the rule you must not break is that
+the answer depends only on the module — no host imports, no reading a clock, nothing that could
+differ between two machines. Sloppy math compiled into your module gives everyone the same
+sloppy answer, which is your problem as a scientist and not a problem for the grid.
+
+**One trap worth naming: do not use `f64::mul_add`.** A fused multiply-add looks like free
+accuracy, and on a target without the instruction it compiles to a call to the platform's `fma`
+— which puts somebody else's libm back into your module through a door you did not know was
+there. `cairn-math` does not use it anywhere, and a test compiles the library and asserts the
+resulting module imports exactly `cairn.input` and `cairn.output` and nothing else.
+
+[ADR-0016](adr/0016-math-belongs-in-the-module-not-the-host.md) has the argument in full,
+including the part that was not looked for: for the worst-case argument in the format, the
+platform's own `sin` returns `-0.2227` where the answer is `1.0`.
+
 ---
 
 ## Limits

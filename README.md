@@ -106,6 +106,7 @@ what it costs, is in **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 | Instrumentation overhead is ≈5% | **Refuted.** Nothing like it — see ADR-0004 |
 | A volunteer can commit to their own execution | **Refuted.** A stock WASM engine hides four of the seven fields a commitment needs — see ADR-0005 |
 | A NaN payload cannot change an answer | **Confirmed** across four engines, including a JIT and the browser's own, on 300 randomly generated float expressions. Checked for teeth against the engine it is about: delete the `copysign` escape site and **V8 answers `-1.5` where Cairn answers `+1.5`** |
+| A workload can get `exp` and `sin` from the host | **Refuted, and then refuted again for a second reason.** V8 and the platform libm return different bits on **every one** of twelve functions — 29.8% of `cbrt` calls, 17.8% of `sinh`. That alone would put two honest volunteers on opposite sides of a dispute. Worse: for the worst-case argument in the format, the platform's own `sin` returns **`-0.2227` where the answer is `1.0`** — confirmed by exact integer arithmetic over a 3000-bit `π`, by V8, and by this project's library, all three agreeing against it. Host math is not merely inconsistent between hosts; it is not dependably correct on any of them. See [ADR-0016](docs/adr/0016-math-belongs-in-the-module-not-the-host.md) |
 | The engine volunteers actually run agrees with Cairn | **Confirmed, and it was unchecked until now.** 1,046 generated units through the browser worker's own `host.js` on V8 — output, trap behaviour and exact instruction count. Every other engine in the gate is Rust linked into the test binary; none of them is the one this project is for |
 | The interpreter agrees with real engines on arbitrary code | **Not yet.** Whole-module generation found a bug on its first run — `br 0` at function scope returns, and Cairn had no function label. Fixed; 146 generated modules now agree, on Cairn, wasmi, wasmtime and V8. Absence of evidence, so far |
 | The honest path costs a volunteer nothing | **Confirmed on a compiler** — 0% under wasmtime on all four shapes, floating point included |
@@ -346,8 +347,9 @@ plainly rather than left implied by unticked boxes.
 | Coordinator: heartbeats, log compaction | Not started — the journal only grows |
 | **Verification policy: canaries + reputation** | **Done** — the first mechanism that catches a cheat without a second volunteer. Measured: a cheat is caught in 3–21 units at ordinary rates, and one cheating 1% of the time usually is not |
 | Penalties | Not started, deliberately — a caught volunteer is checked harder and nothing else. Excluding somebody needs an operator, not a constant |
+| **Deterministic math for workloads** | **Done** — `cairn-math`, 26 functions, no dependencies, built from nothing but the arithmetic WebAssembly pins down. Within 1–2 units in the last place of the platform over 200,000 samples each, and **identical bits** on all four engines. It also gets the format's worst case right where the platform does not |
 | Dashboard + live globe | Not started |
-| A real scientific workload (molecular docking) | Not started |
+| A real scientific workload (molecular docking) | Not started — but the transcendental functions it needs now exist |
 
 That order was deliberate: build the hard, novel, falsifiable part first, so that if the
 window closed early, what survived would be the thing nobody else has rather than a job

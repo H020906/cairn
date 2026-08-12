@@ -5,6 +5,9 @@ members = [
     "worker-native",
     "coordinator",
     "demo",
+    # Not part of the grid — a library workloads link against. It is a workspace member so
+    # that `cargo test --workspace` covers it and `cargo clippy` holds it to the same rules.
+    "workloads/rust/cairn-math",
 ]
 
 [workspace.package]

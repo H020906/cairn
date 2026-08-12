@@ -102,6 +102,22 @@ jobs:
             workloads/examples/rust/target/wasm32-unknown-unknown/release/cairn_workload_example.wasm \
             workloads/examples/input-a.bin
 
+      - name: The math library computes the same bits on every engine
+        # A workload's `exp` cannot come from the host: measured over twenty thousand inputs,
+        # V8 and the platform libm disagree on every one of twelve functions, and on `cbrt` they
+        # disagree on 29.8% of them (ADR-0016). So the math is compiled into the module, and the
+        # thing that has to hold is that four independent engines produce identical bytes.
+        #
+        # CAIRN_REQUIRE_WASM=1 turns the "wasm32 target not installed" skip into a failure. A
+        # test that quietly did not run is worse than one that failed, and this is the test that
+        # stands behind the whole library.
+        env:
+          CAIRN_REQUIRE_WASM: "1"
+          CAIRN_REQUIRE_NODE: "1"
+        run: |
+          cargo test -p cairn-math --release -- --nocapture
+          cargo test -p cairn-runtime --release --test differential the_math_library -- --nocapture
+
       - name: How long a cheat lasts, measured rather than assumed
         # ADR-0001 rests on a canary rate `c` and never said how fast sampling catches anybody.
         # This runs volunteers that cheat at known rates against the real Grid and prints the

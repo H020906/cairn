@@ -103,10 +103,20 @@ fn canonical(text: &str) -> Vec<u8> {
 
 /// The same, under a chosen instrumentation configuration.
 fn canonical_with(text: &str, config: Config) -> Vec<u8> {
-    let source = wat::parse_str(text).expect("module should assemble");
-    validate::validate_submitted(&source, validate::Limits::default())
+    canonical_bytes(
+        &wat::parse_str(text).expect("module should assemble"),
+        config,
+    )
+}
+
+/// The same again, for a module that arrived as bytes rather than as text.
+///
+/// Everything else in this file writes its cases in WebAssembly's text format. The math library
+/// does not: it is compiled from Rust by a real toolchain, which is the point of it.
+fn canonical_bytes(source: &[u8], config: Config) -> Vec<u8> {
+    validate::validate_submitted(source, validate::Limits::default())
         .expect("module should be a valid Cairn workload");
-    canon::instrument(&source, config).expect("instrumentation should succeed")
+    canon::instrument(source, config).expect("instrumentation should succeed")
 }
 
 /// Both settings a volunteer could plausibly run, checked against the fully instrumented module.
@@ -1414,6 +1424,242 @@ fn a_deliberate_divergence_is_caught() {
     assert!(outcome.fuel > 0, "the reference engine charged no fuel");
 }
 
+// --- the math library ------------------------------------------------------------------------
+
+/// Builds `workloads/rust/math-probe` to WebAssembly, or `None` if the target is not installed.
+///
+/// Two `rustc` invocations rather than a nested cargo: `cairn-math` has no dependencies, so
+/// there is nothing to resolve, and a cargo inside a cargo contends for the same build lock.
+fn math_probe_module() -> Option<Vec<u8>> {
+    let rustc = std::env::var("RUSTC")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            let beside = std::env::var("CARGO").ok().map(|cargo| {
+                std::path::Path::new(&cargo).with_file_name(if cfg!(windows) {
+                    "rustc.exe"
+                } else {
+                    "rustc"
+                })
+            });
+            beside
+                .filter(|path| path.exists())
+                .unwrap_or_else(|| "rustc".into())
+        });
+
+    let workloads = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/rust");
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("math-probe");
+    std::fs::create_dir_all(&out).expect("should be able to write under the target dir");
+    let rlib = out.join("libcairn_math.rlib");
+
+    // The same flags `docs/WORKLOADS.md` tells a workload author to pass, for the same reasons:
+    // the memory maximum is required for admission and no toolchain emits one, and the shadow
+    // stack has to be shrunk first or the link fails with a message that never mentions stacks.
+    // The optimisation flags are worth a hundredfold in module size — see
+    // `cairn-math/tests/wasm.rs`.
+    let common = [
+        "--edition",
+        "2021",
+        "--target",
+        "wasm32-unknown-unknown",
+        "-C",
+        "opt-level=3",
+        "-C",
+        "panic=abort",
+        "-C",
+        "lto=fat",
+        "-C",
+        "codegen-units=1",
+        "-C",
+        "strip=symbols",
+        "-C",
+        "link-arg=-zstack-size=131072",
+        "-C",
+        "link-arg=--initial-memory=262144",
+        "-C",
+        "link-arg=--max-memory=262144",
+    ];
+
+    let built = std::process::Command::new(&rustc)
+        .args(common)
+        .args(["--crate-type", "rlib", "--crate-name", "cairn_math"])
+        .arg("-o")
+        .arg(&rlib)
+        .arg(workloads.join("cairn-math/src/lib.rs"))
+        .output()
+        .ok()?;
+    if !built.status.success() {
+        // A missing target is the expected reason and is not a failure; anything else is
+        // reported, because a silently skipped test is worse than a failing one.
+        let complaint = String::from_utf8_lossy(&built.stderr);
+        assert!(
+            complaint.contains("wasm32-unknown-unknown"),
+            "building cairn-math for WebAssembly failed for a reason other than a missing \
+             target:\n{complaint}"
+        );
+        return None;
+    }
+
+    let wasm = out.join("math-probe.wasm");
+    let built = std::process::Command::new(&rustc)
+        .args(common)
+        .args(["--crate-type", "cdylib", "--crate-name", "math_probe"])
+        .arg("--extern")
+        .arg(format!("cairn_math={}", rlib.display()))
+        .arg("-o")
+        .arg(&wasm)
+        .arg(workloads.join("math-probe/probe.rs"))
+        .output()
+        .ok()?;
+    assert!(
+        built.status.success(),
+        "building the math probe failed:\n{}",
+        String::from_utf8_lossy(&built.stderr)
+    );
+    Some(std::fs::read(&wasm).expect("the probe module was not written"))
+}
+
+/// Arguments for the math probe, in batches of eight.
+///
+/// Chosen for the places a transcendental function can behave differently rather than for
+/// coverage of the number line: the named values whose results are specified, the boundaries
+/// each function branches on, and — for the trigonometric functions — magnitudes far past where
+/// a limited-precision argument reduction stops working.
+fn math_arguments() -> Vec<Vec<u8>> {
+    let mut values = vec![
+        0.0,
+        -0.0,
+        1.0,
+        -1.0,
+        0.5,
+        -0.5,
+        2.0,
+        -2.0,
+        f64::INFINITY,
+        f64::NEG_INFINITY,
+        f64::NAN,
+        // A NaN with a payload that is not the canonical one, which is what makes the
+        // canonicalization rules observable.
+        f64::from_bits(0x7ff8_0000_0000_0001),
+        f64::from_bits(0xfff8_0000_0000_0001),
+        f64::MIN_POSITIVE,
+        -f64::MIN_POSITIVE,
+        f64::MAX,
+        f64::MIN,
+        // Subnormals, which several functions have a separate path for.
+        f64::from_bits(1),
+        f64::from_bits(0x8000_0000_0000_0001),
+        f64::from_bits(0x000f_ffff_ffff_ffff),
+        // The constants the reductions branch around.
+        std::f64::consts::PI,
+        std::f64::consts::FRAC_PI_2,
+        std::f64::consts::FRAC_PI_4,
+        std::f64::consts::LN_2,
+        std::f64::consts::E,
+        // The worst case for argument reduction in this format: `x * (2/pi)` sits within
+        // 2^-61 of an integer here, so the reduction has to carry over a hundred bits.
+        6_381_956_970_095_103.0 * f64::from_bits(((1023 + 797) as u64) << 52),
+        // Overflow and underflow thresholds for exp.
+        709.782_712_893_383_9,
+        -745.133_219_101_941_1,
+        710.0,
+        -746.0,
+    ];
+
+    // And a seeded spread across the whole exponent range, so the corpus is not only the cases
+    // someone thought of.
+    let mut rng = Rng(0xfeed_face_0bad_c0de);
+    for _ in 0..200 {
+        let exponent = (rng.next() % 2041) as i64 - 1020;
+        let mantissa = rng.next() & ((1 << 52) - 1);
+        let sign = (rng.next() & 1) << 63;
+        values.push(f64::from_bits(
+            sign | (((exponent + 1023) as u64) << 52) | mantissa,
+        ));
+    }
+
+    values
+        .chunks(8)
+        .map(|batch| {
+            batch
+                .iter()
+                .flat_map(|v| v.to_bits().to_le_bytes())
+                .collect()
+        })
+        .collect()
+}
+
+/// The property [`cairn-math`](../../workloads/rust/cairn-math/src/lib.rs) exists for.
+///
+/// WebAssembly has no `exp`, no `log` and no `sin`, so a workload that needs them must either
+/// import them from the host or compile them in. Importing them is the obvious choice and it
+/// would break Cairn: measured over twenty thousand inputs, V8 and the platform libm this test
+/// runs on disagree on **every one** of twelve functions, and on `cbrt` they disagree on 29.8%
+/// of them. Under Cairn's rules a disagreement is not a rounding difference — it is a dispute,
+/// and arbitration would convict whichever honest volunteer was on the engine that lost.
+///
+/// So the math is compiled into the module, out of nothing but the arithmetic WebAssembly
+/// specifies exactly. This test is the evidence that it worked. It is the only case in this
+/// file compiled from Rust by a real toolchain rather than written in the text format, which
+/// also makes it the only one that checks Cairn admits what a stock toolchain emits.
+#[test]
+fn the_math_library_computes_the_same_bits_on_every_engine() {
+    let Some(source) = math_probe_module() else {
+        assert!(
+            !std::env::var("CAIRN_REQUIRE_WASM").is_ok_and(|required| required == "1"),
+            "CAIRN_REQUIRE_WASM=1 but wasm32-unknown-unknown is not installed"
+        );
+        println!(
+            "SKIPPED: wasm32-unknown-unknown is not installed, so the math library was NOT \
+             checked across engines. Install it with `rustup target add \
+             wasm32-unknown-unknown`, or set CAIRN_REQUIRE_WASM=1 to make this a failure."
+        );
+        return;
+    };
+
+    let arguments = math_arguments();
+    let mut checked = 0u32;
+    for (which, config) in [
+        ("dispute", Config::default()),
+        ("honest", HONEST_CONFIGS[0]),
+    ] {
+        let module = canonical_bytes(&source, config);
+        for (index, input) in arguments.iter().enumerate() {
+            let name = format!("math {which} batch {index}");
+            let mine = run_cairn(&module, input);
+            if mine.hit_a_cairn_limit {
+                continue;
+            }
+            assert!(
+                mine.output.is_some(),
+                "{name}: the math library trapped, which it has no business doing"
+            );
+
+            let interpreted = run_wasmi(&module, input);
+            assert_eq!(
+                mine.fuel, interpreted.fuel,
+                "{name}: fuel differs against wasmi"
+            );
+            assert_eq!(
+                mine.output, interpreted.output,
+                "{name}: output differs against wasmi"
+            );
+
+            let compiled = run_wasmtime(&module, input);
+            assert_eq!(
+                mine.fuel, compiled.fuel,
+                "{name}: fuel differs against wasmtime"
+            );
+            assert_eq!(
+                mine.output, compiled.output,
+                "{name}: output differs against wasmtime"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 50, "only {checked} math batches were compared");
+    println!("{checked} batches of eight arguments agreed across three engines");
+}
+
 // --- the fourth engine: the one volunteers actually use ---------------------------------------
 
 /// One case handed to the browser's engine, with what Cairn made of it kept on this side.
@@ -1548,6 +1794,38 @@ fn browser_corpus() -> Vec<BrowserCase> {
             input: Vec::new(),
             expected,
         });
+    }
+
+    // And the math library, which is the reason the browser matters most of all. Every other
+    // case here is arithmetic WebAssembly specifies exactly, where agreement is close to
+    // guaranteed. `cairn-math` is arithmetic the *specification says nothing about* — `exp`,
+    // `log`, `sin`, `pow` — reconstructed out of the operations it does specify. The measured
+    // reason for doing that is that V8 and the platform libm disagree on every one of twelve
+    // such functions, so V8 is precisely the engine this has to be checked against.
+    //
+    // Only the leading batches are sent. They hold the named values, the boundaries each
+    // function branches on, and the worst case for argument reduction; the rest are a random
+    // spread that the three in-process engines already cover, and each case here costs a
+    // fifteen-kilobyte file on disk.
+    if let Some(source) = math_probe_module() {
+        for (which, config) in [
+            ("dispute", Config::default()),
+            ("honest", HONEST_CONFIGS[0]),
+        ] {
+            let module = canonical_bytes(&source, config);
+            for (index, input) in math_arguments().iter().take(8).enumerate() {
+                let expected = run_cairn(&module, input);
+                if expected.hit_a_cairn_limit {
+                    continue;
+                }
+                corpus.push(BrowserCase {
+                    name: format!("math batch {index} ({which})"),
+                    module: module.clone(),
+                    input: input.clone(),
+                    expected,
+                });
+            }
+        }
     }
 
     corpus

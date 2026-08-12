@@ -1,0 +1,25 @@
+[package]
+name = "cairn-math"
+description = "Transcendental math that computes the same bits on every engine, for Cairn workloads"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+# No dependencies, and this is the point rather than an accident. A workload's dependency tree
+# is not like a build tool's: every byte of it is executed by volunteers and committed to by
+# the grid. See the crate documentation for what is taken from `std` and why that short list
+# is safe.
+
+# Inside the workspace, unlike `workloads/examples/rust`, which says in its own manifest that a
+# workload has no business being built by `cargo test --workspace`. That is right, and this is
+# not a workload — it is a **library** that workloads link against, it compiles and runs
+# natively, and its tests are ordinary Rust tests that measure accuracy against the platform's
+# own math. It also wants the workspace lints rather than merely tolerating them: `float_cmp`
+# is denied, which in a numeric library is exactly the rule worth having, and `unsafe_code` is
+# denied, which is why the one unsafe block a workload needs lives in `math-probe/probe.rs`
+# and not here.
+[lints]
+workspace = true

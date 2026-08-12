@@ -109,6 +109,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "cairn-math"
+version = "0.1.0"
+
+[[package]]
 name = "cairn-runtime"
 version = "0.1.0"
 dependencies = [
