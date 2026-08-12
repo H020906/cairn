@@ -52,7 +52,7 @@ use cairn_runtime::canon::{self, Config};
 use cairn_runtime::engine::image;
 use cairn_runtime::validate;
 
-use crate::dispute::{self, Conclusion, Dispute};
+use crate::dispute::{self, Conclusion, Dispute, ReExecution};
 use crate::journal::Entry;
 use crate::reputation::{Reputation, Standing};
 use cairn_runtime::dispute::Party;
@@ -196,11 +196,35 @@ pub enum Outcome {
     ///
     /// The fallback route, taken when the parties cannot argue — see [`Submission::bisects`].
     Settled {
-        /// What the referee concluded, in words, including how it concluded it.
-        verdict: String,
+        /// What the referee concluded. `Display` renders it as the sentence this used to be.
+        verdict: dispute::ReExecution,
+        /// The volunteers whose results the referee's own execution contradicts, by name.
+        ///
+        /// **The whole point of ADR-0017.** [`dispute::ReExecution`] names *parties*, which are
+        /// positions in an argument; reputation and the journal need *workers*, and this is the
+        /// only place both are in scope at once. Leaving the translation to a later reader is
+        /// how the finding got lost the first time.
+        refuted: Vec<String>,
         /// The answer, when the referee could establish one.
         output: Option<Vec<u8>>,
     },
+}
+
+/// What a concluded dispute costs a volunteer.
+///
+/// Three of them rather than a boolean, because there are three genuinely different things the
+/// coordinator can know: that a party corrupted its own replay, that a party stopped answering,
+/// and that a party's *result* was wrong without any evidence about why. The last one arrived
+/// with ADR-0017; before it, the middle one was doing double duty and the third was not recorded
+/// at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Charge {
+    /// Lost a bisection. The heaviest thing this project can establish about a volunteer.
+    Lie,
+    /// Stopped answering, or honestly replayed a trace that contradicts its own reported answer.
+    Silence,
+    /// The referee re-executed the unit and this volunteer's result is not the answer.
+    Refutation,
 }
 
 /// Why a submission was refused.
@@ -509,15 +533,24 @@ impl Grid {
                 Entry::Settled {
                     unit,
                     verdict,
+                    refuted,
                     output,
                 } => {
                     self.units
                         .get_mut(*unit)
                         .ok_or_else(|| format!("{}: no unit {unit}", at()))?
                         .outcome = Outcome::Settled {
-                        verdict: verdict.clone(),
+                        verdict: *verdict,
+                        refuted: refuted.clone(),
                         output: output.clone(),
                     };
+                    // Reading a fact back, not re-deciding one — ADR-0014's rule, and this
+                    // satisfies it because the referee already executed the unit and already
+                    // named these workers. Nothing is re-executed here and no verdict is
+                    // recomputed; the entry says who was wrong and this believes it.
+                    for worker in refuted {
+                        self.reputation.refuted(worker);
+                    }
                     restored.decided += 1;
                 }
 
@@ -734,43 +767,50 @@ impl Grid {
                     .cloned()
             };
 
-            let charge: Vec<(String, bool)> = match conclusion {
+            let charge: Vec<(String, Charge)> = match conclusion {
                 // Proven, by executing the instruction they disagreed about. The heaviest thing
                 // this project can establish about a volunteer.
                 Conclusion::Convicted { liar, .. } => party(*liar)
-                    .map(|who| vec![(who, true)])
+                    .map(|who| vec![(who, Charge::Lie)])
                     .unwrap_or_default(),
                 // Went quiet. ADR-0001 insists this cost materially less than a proven lie, and
                 // `Policy::weight_of_silence` is where that lives.
-                Conclusion::Abandoned { by, .. } => {
-                    party(*by).map(|who| vec![(who, false)]).unwrap_or_default()
-                }
+                Conclusion::Abandoned { by, .. } => party(*by)
+                    .map(|who| vec![(who, Charge::Silence)])
+                    .unwrap_or_default(),
                 // Two parties lied about the same instruction and disagreed about how. Not
                 // reachable by accident.
                 Conclusion::BothWrong { .. } => dispute
                     .parties
                     .iter()
-                    .map(|who| (who.clone(), true))
+                    .map(|who| (who.clone(), Charge::Lie))
                     .collect(),
                 // Nobody lied — both replays agreed, and the trace they agreed on named whose
                 // *reported answer* was wrong. A wrong answer honestly replayed is a broken
                 // engine, not a liar, so it is charged as a failed check rather than a lie.
                 Conclusion::AgreedOnTrace { wrong, .. } => wrong
                     .and_then(party)
-                    .map(|who| vec![(who, false)])
+                    .map(|who| vec![(who, Charge::Silence)])
                     .unwrap_or_default(),
-                // The interactive protocol could not decide it, so nothing is proven about
-                // anybody. Charging a party here would be charging them for the protocol
-                // failing, which is the coordinator's problem and not theirs.
-                Conclusion::FellBack { .. } => Vec::new(),
+                // The protocol failing proves nothing about anybody — but the re-execution it
+                // fell back to may prove plenty, because the referee ran the unit and holds the
+                // answer. **The old comment here said "nothing is proven" and was right only
+                // because the verdict was a `String` nothing could read.** `ReExecution::NoAnswer`
+                // is the case that really does establish nothing, and it says so itself.
+                Conclusion::FellBack { verdict, .. } => verdict
+                    .refuted()
+                    .iter()
+                    .filter_map(|who| party(*who))
+                    .map(|who| (who, Charge::Refutation))
+                    .collect(),
             };
 
             drop(log);
-            for (who, proven_lie) in charge {
-                if proven_lie {
-                    self.reputation.lied(&who);
-                } else {
-                    self.reputation.went_silent(&who);
+            for (who, charge) in charge {
+                match charge {
+                    Charge::Lie => self.reputation.lied(&who),
+                    Charge::Silence => self.reputation.went_silent(&who),
+                    Charge::Refutation => self.reputation.refuted(&who),
                 }
             }
             self.accounted.insert(index);
@@ -1009,13 +1049,60 @@ impl Grid {
 
         let Ok(image) = image::decode(&disputable) else {
             return Outcome::Settled {
-                verdict: "the disputed module could not be decoded".to_owned(),
+                verdict: dispute::ReExecution::NoAnswer,
+                refuted: Vec::new(),
                 output: None,
             };
         };
+        let names = [first.worker, second.worker];
         let (verdict, output) =
             dispute::by_re_execution(&image, &input, &[first.output, second.output]);
-        Outcome::Settled { verdict, output }
+
+        // The referee has just executed the unit and knows which of these two volunteers returned
+        // something else. Before ADR-0017 that finding reached the unit's outcome and stopped
+        // there, so replication caught cheats and reputation never heard about it.
+        //
+        // Charged as a wrong answer, not as a lie. The referee proved the *result* wrong and
+        // nothing about why: this route exists precisely because these parties cannot argue, and
+        // a browser volunteer whose engine diverges gets here in good faith.
+        let refuted: Vec<String> = verdict
+            .refuted()
+            .iter()
+            .filter_map(|party| {
+                names
+                    .get(match party {
+                        Party::First => 0,
+                        Party::Second => 1,
+                    })
+                    .cloned()
+            })
+            .collect();
+        for worker in &refuted {
+            self.reputation.refuted(worker);
+        }
+
+        // And the other one did the work, so it is credited with having done it — the same
+        // `accepted` an undisputed unit earns everybody who ran it, and for the same reason:
+        // contribution, not trust. Only a canary or a refutation says anything about honesty.
+        //
+        // Without this a volunteer that computed correctly and had the referee confirm it came
+        // out of the disagreement with nothing recorded at all, purely because the *other* party
+        // was wrong. Like every other `accepted`, the count does not survive a restart.
+        if let ReExecution::Refuted { wrong } = verdict {
+            let right = match wrong {
+                Party::First => names.get(1),
+                Party::Second => names.first(),
+            };
+            if let Some(worker) = right {
+                self.reputation.accepted(worker);
+            }
+        }
+
+        Outcome::Settled {
+            verdict,
+            refuted,
+            output,
+        }
     }
 }
 

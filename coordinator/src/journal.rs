@@ -54,10 +54,16 @@
 //! parties are recorded in [`Entry::Disputed`] so that when reputation lands, "the coordinator
 //! dropped this argument" stays distinguishable from "this worker walked away from one".
 //!
-//! **A concluded dispute's verdict is lost too**, and that is a real limitation rather than an
-//! oversight. It costs nothing *today* because no verdict has a consequence — `grid.rs` says
-//! plainly that there are no penalties and no reputation. When B2 gives a verdict teeth, verdicts
-//! become worth persisting and this file will need an entry for them.
+//! **A concluded bisection's verdict is still lost**, and that is a real limitation rather than
+//! an oversight. It was harmless while no verdict had a consequence; B2 gave verdicts teeth and
+//! ADR-0017 connected the second route to them, so the gap is now genuine: a coordinator
+//! restarted after convicting a liar has forgotten the conviction.
+//!
+//! **The re-execution route does survive**, because its finding rides along with an outcome that
+//! was already being written down. [`Entry::Settled`] carries the verdict and the names it
+//! refuted, and replay charges them again. Closing the same hole for bisection needs an entry
+//! written from `Grid::account_for_finished_disputes`, which is a sweep rather than a request
+//! path and has no journal in scope — a contained job, and a different one.
 //!
 //! # The format
 //!
@@ -74,6 +80,10 @@
 use std::fs::{File, OpenOptions};
 use std::io::{Read as _, Write as _};
 use std::path::{Path, PathBuf};
+
+use cairn_runtime::dispute::Party;
+
+use crate::dispute::ReExecution;
 
 /// Bytes of BLAKE3 kept after each record.
 ///
@@ -153,8 +163,16 @@ pub enum Entry {
     Settled {
         /// Which unit.
         unit: usize,
-        /// What the referee concluded, in words.
-        verdict: String,
+        /// What the referee concluded.
+        verdict: ReExecution,
+        /// The volunteers its own execution contradicted, by name.
+        ///
+        /// **Recorded rather than re-derived, and ADR-0014's rule is why.** The verdict names
+        /// *parties*, and turning a party back into a worker means knowing which of the two
+        /// submissions came first — a fact this entry does not carry and replay must not guess
+        /// at. Writing the names down keeps replay a reading of facts instead of a re-run of the
+        /// decision that produced them.
+        refuted: Vec<String>,
         /// The answer it decided on, if it reached one.
         output: Option<Vec<u8>>,
     },
@@ -387,6 +405,46 @@ fn put_usize(out: &mut Vec<u8>, value: usize) {
     out.extend_from_slice(&(value as u64).to_le_bytes());
 }
 
+/// A re-execution verdict as one byte.
+///
+/// These numbers are a wire format: changing what an existing one means silently rewrites
+/// history, so add rather than renumber.
+const fn verdict_tag(verdict: ReExecution) -> u8 {
+    match verdict {
+        ReExecution::Refuted {
+            wrong: Party::First,
+        } => 0,
+        ReExecution::Refuted {
+            wrong: Party::Second,
+        } => 1,
+        ReExecution::BothRefuted => 2,
+        ReExecution::NoAnswer => 3,
+        ReExecution::NotADisagreement => 4,
+    }
+}
+
+/// The inverse, refusing anything it does not recognise.
+///
+/// **`None` is what makes a journal from before ADR-0017 fail loudly.** That format put a
+/// length-prefixed sentence where this byte now sits, so the first byte of an old record's
+/// verdict is a string length — never one of these five in practice, and a corrupt-file error is
+/// the right answer either way. Silently misreading an old journal would restore a coordinator
+/// with invented verdicts, which is worse than refusing to start.
+const fn verdict_from_tag(tag: u8) -> Option<ReExecution> {
+    match tag {
+        0 => Some(ReExecution::Refuted {
+            wrong: Party::First,
+        }),
+        1 => Some(ReExecution::Refuted {
+            wrong: Party::Second,
+        }),
+        2 => Some(ReExecution::BothRefuted),
+        3 => Some(ReExecution::NoAnswer),
+        4 => Some(ReExecution::NotADisagreement),
+        _ => None,
+    }
+}
+
 fn encode(entry: &Entry) -> Vec<u8> {
     let mut out = Vec::new();
     match entry {
@@ -428,11 +486,16 @@ fn encode(entry: &Entry) -> Vec<u8> {
         Entry::Settled {
             unit,
             verdict,
+            refuted,
             output,
         } => {
             out.push(TAG_SETTLED);
             put_usize(&mut out, *unit);
-            put_bytes(&mut out, verdict.as_bytes());
+            out.push(verdict_tag(*verdict));
+            put_usize(&mut out, refuted.len());
+            for worker in refuted {
+                put_bytes(&mut out, worker.as_bytes());
+            }
             out.push(u8::from(output.is_some()));
             put_bytes(&mut out, output.as_deref().unwrap_or_default());
         }
@@ -529,12 +592,25 @@ fn decode(payload: &[u8], index: usize) -> Result<Entry, Error> {
         },
         TAG_SETTLED => {
             let unit = reader.usize().ok_or_else(corrupt)?;
-            let verdict = reader.text().ok_or_else(corrupt)?;
+            let verdict =
+                verdict_from_tag(reader.byte().ok_or_else(corrupt)?).ok_or_else(corrupt)?;
+            let count = reader.usize().ok_or_else(corrupt)?;
+            // A count is a length prefix like any other and gets the same treatment: two parties
+            // is the most a dispute has, so anything larger is a corrupted byte asking for an
+            // allocation rather than a record.
+            if count > 2 {
+                return Err(corrupt());
+            }
+            let mut refuted = Vec::with_capacity(count);
+            for _ in 0..count {
+                refuted.push(reader.text().ok_or_else(corrupt)?);
+            }
             let has_output = reader.byte().ok_or_else(corrupt)? != 0;
             let output = reader.bytes().ok_or_else(corrupt)?.to_vec();
             Entry::Settled {
                 unit,
                 verdict,
+                refuted,
                 output: has_output.then_some(output),
             }
         }
@@ -574,6 +650,42 @@ mod tests {
         std::env::temp_dir().join(format!("cairn-journal-test-{name}"))
     }
 
+    #[test]
+    fn a_settled_record_from_before_the_verdict_had_a_type_is_refused_rather_than_misread() {
+        // The one hazard in changing a wire format, and the reason `verdict_from_tag` returns an
+        // `Option` instead of falling back to something harmless-looking. Until ADR-0017 a
+        // settled record carried a length-prefixed sentence where the verdict byte now sits, so
+        // this reader would take the first byte of a string length as a verdict. Restoring a
+        // coordinator with an invented verdict is worse than refusing to start.
+        //
+        // Written as bytes rather than by the old encoder, which is gone. What matters is the
+        // shape: a plausible byte in the verdict position that this reader does not know.
+        let mut payload = vec![TAG_SETTLED];
+        payload.extend_from_slice(&0_u64.to_le_bytes());
+        payload.push(b'\x2a');
+
+        assert!(
+            decode(&payload, 0).is_err(),
+            "an unrecognised verdict tag was accepted"
+        );
+
+        // And every tag it *does* know survives the trip, so the guard above is rejecting the
+        // right thing rather than everything.
+        for verdict in [
+            ReExecution::Refuted {
+                wrong: Party::First,
+            },
+            ReExecution::Refuted {
+                wrong: Party::Second,
+            },
+            ReExecution::BothRefuted,
+            ReExecution::NoAnswer,
+            ReExecution::NotADisagreement,
+        ] {
+            assert_eq!(verdict_from_tag(verdict_tag(verdict)), Some(verdict));
+        }
+    }
+
     fn every_shape() -> Vec<Entry> {
         vec![
             Entry::Registered {
@@ -605,13 +717,25 @@ mod tests {
             },
             Entry::Settled {
                 unit: 8,
-                verdict: "the second party was wrong".to_owned(),
+                verdict: ReExecution::Refuted {
+                    wrong: Party::Second,
+                },
+                refuted: vec!["bob".to_owned()],
                 output: Some(vec![4, 5]),
             },
             Entry::Settled {
                 unit: 9,
-                verdict: "no verdict is possible".to_owned(),
+                verdict: ReExecution::NoAnswer,
+                refuted: Vec::new(),
                 output: None,
+            },
+            // Both refuted, so both names ride along. The one shape a caller that only handled
+            // `Refuted` would silently shorten.
+            Entry::Settled {
+                unit: 10,
+                verdict: ReExecution::BothRefuted,
+                refuted: vec!["bob".to_owned(), "carol".to_owned()],
+                output: Some(vec![7]),
             },
             Entry::Leased {
                 unit: 11,

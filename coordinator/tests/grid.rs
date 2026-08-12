@@ -8,7 +8,9 @@
 
 use std::time::{Duration, Instant};
 
+use cairn_coordinator::dispute::ReExecution;
 use cairn_coordinator::grid::{Grid, Outcome, Refusal, Submission};
+use cairn_runtime::dispute::Party;
 
 const WORKLOAD: &str = r#"
     (module
@@ -185,11 +187,21 @@ fn a_disagreement_between_parties_that_cannot_argue_is_settled_by_re_execution()
 
     match outcome {
         Outcome::Settled {
-            verdict, output, ..
+            verdict,
+            refuted,
+            output,
         } => {
-            assert!(
-                verdict.contains("second party"),
-                "the liar answered second, so it is the second party: {verdict}"
+            assert_eq!(
+                verdict,
+                ReExecution::Refuted {
+                    wrong: Party::Second
+                },
+                "the liar answered second, so it is the second party"
+            );
+            assert_eq!(
+                refuted,
+                vec!["liar".to_owned()],
+                "the verdict names a position in an argument; reputation needs a name"
             );
             assert_eq!(
                 output,
@@ -199,6 +211,36 @@ fn a_disagreement_between_parties_that_cannot_argue_is_settled_by_re_execution()
         }
         other => panic!("expected a settlement, got {other:?}"),
     }
+
+    // The point of ADR-0017. Before it, everything above passed and this did not exist: the
+    // referee had just proved which volunteer returned a wrong answer, and the only place that
+    // went was a sentence in the unit's outcome.
+    assert_eq!(
+        grid.reputation().record("liar").refuted,
+        1,
+        "replication caught a cheat and reputation never heard about it"
+    );
+    assert!(grid.reputation().record("liar").is_proven_wrong());
+    assert_eq!(
+        grid.reputation().record("liar").lied,
+        0,
+        "re-execution proves a result wrong, never that a party lied about it"
+    );
+    assert_eq!(
+        grid.reputation().record("honest").refuted,
+        0,
+        "the volunteer that was right must not be charged for the other one being wrong"
+    );
+    assert_eq!(
+        grid.reputation().record("honest").accepted,
+        1,
+        "it did the work and the referee confirmed it, so it is credited with having done it"
+    );
+    assert_eq!(
+        grid.reputation().record("honest").passed,
+        0,
+        "winning a disagreement is contribution, not a passed canary — trust is not for sale here"
+    );
 }
 
 #[test]

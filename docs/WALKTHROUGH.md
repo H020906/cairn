@@ -173,7 +173,7 @@ curl -s -X POST "http://127.0.0.1:8080/api/result?unit=0&worker=liar" -d deadbee
 ```
 
 ```json
-{"state":"settled","by":"re-execution","verdict":"the second party was wrong ...","output":"bd3e5cfce4250000"}
+{"state":"settled","by":"re-execution","verdict":"the second party was wrong ...","refuted":["liar"],"output":"bd3e5cfce4250000"}
 ```
 
 **Read `"by"`, because there are two routes and they cost very different things.** `curl` did not
@@ -181,6 +181,36 @@ declare that it can argue, so this one was settled by the referee executing the 
 is a route rather than a gap: answering a challenge means producing a state root, and no browser
 engine can, so challenging a volunteer that cannot answer would convict it for silence
 ([ADR-0011](adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md)).
+
+**Then read `"refuted"`, which is the finding rather than the sentence.** The referee executed this
+unit, so it holds the answer and knows which volunteer did not return it. That name goes to
+reputation:
+
+```bash
+curl -s "http://127.0.0.1:8080/api/reputation"
+```
+
+```json
+[{"worker":"honest","accepted":1,"canariesPassed":0,"canariesFailed":0,"refuted":0,"lies":0,
+  "silences":0,"checkedEvery":250,"standing":{"kind":"unproven","canariesNeeded":3}},
+ {"worker":"liar","accepted":0,"canariesPassed":0,"canariesFailed":0,"refuted":1,"lies":0,
+  "silences":0,"checkedEvery":250,"standing":{"kind":"provenWrong","failedCanaries":0,
+  "refutedResults":1,"provenLies":0}}]
+```
+
+**`checkedEvery` is 250 for both, and that is not the mechanism failing.** A volunteer nobody has
+seen is already checked hard; what changed is the *standing*. `honest` is `unproven` and can leave
+that state — nine clean canaries take it to 30‰, the rate ADR-0001's cost model is written around.
+`liar` is `provenWrong`, and nothing takes it out of that state, so it stays at 250‰ however well
+it behaves from here. **`is_proven_wrong` deliberately sits outside the posterior**: a thousand
+later right answers do not un-do one answer the coordinator can show was wrong.
+
+**`"lies":0` is not an oversight either.** Re-execution proves the *result* wrong and nothing about
+why — this route exists because these volunteers cannot argue, which means browsers, and a browser
+whose engine diverges from Cairn's interpreter arrives here in good faith. A proven lie needs a
+bisection and weighs twenty times as much. See
+[ADR-0017](adr/0017-a-verdict-nobody-can-read-is-not-a-verdict.md), which exists because this route
+reported all of the above as an English sentence that reputation could not read.
 
 ## 5b · The same dispute, bisected instead
 

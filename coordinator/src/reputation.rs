@@ -20,7 +20,10 @@
 //! - The **weights** are the one genuine judgement, and there is precisely one of them: a proven
 //!   lie counts for more than a failed canary. ADR-0001 asks for that too — "the reputation
 //!   penalty for silence is materially different from the penalty for a proven wrong state
-//!   transition" — and the number is a dial rather than a belief.
+//!   transition" — and the number is a dial rather than a belief. **A refuted result deliberately
+//!   did not add a second one.** When the referee re-executes a disputed unit it ends up holding
+//!   the true answer, which is the same position a canary puts it in, so the two are weighed
+//!   alike; inventing a dial to make them differ would have been a belief with nothing behind it.
 //!
 //! # Integers, not floats
 //!
@@ -42,6 +45,24 @@ pub struct Record {
     /// Canaries answered incorrectly. **Direct evidence of a wrong answer**, needing no dispute
     /// and no second volunteer: the coordinator already knew what the answer was.
     pub failed: u32,
+    /// Results the referee re-executed and found wrong.
+    ///
+    /// **The same kind of evidence as [`failed`](Self::failed), arrived at from the other end.**
+    /// A canary is a unit whose answer the coordinator knew in advance; a refutation is a unit
+    /// whose answer it worked out afterwards, because two volunteers disagreed and neither could
+    /// argue. Either way the coordinator holds the true answer and this worker's differs from it,
+    /// so the two count the same in the posterior and are weighed as one failed check each.
+    ///
+    /// **Kept as its own counter anyway, for two reasons.** The canary measurement in
+    /// `tests/canaries.rs` reports units-until-caught and would be contaminated by catches that
+    /// no canary made; and an operator looking at [`Standing::ProvenWrong`] should be able to see
+    /// which mechanism did the catching, because they cost very different amounts.
+    ///
+    /// **Not counted as a lie.** The referee proved the *result* wrong and proved nothing about
+    /// intent: a browser volunteer whose engine diverges returns a wrong answer honestly, and
+    /// that is the failure this whole project is arranged to avoid punishing. Only losing a
+    /// bisection shows a party corrupting its own replay, and only that is [`lied`](Self::lied).
+    pub refuted: u32,
     /// Disputes this worker was proven to have lied in.
     pub lied: u32,
     /// Disputes this worker abandoned by going quiet.
@@ -68,6 +89,7 @@ impl Record {
         let good = policy.prior_good as u64 + self.passed as u64;
         let bad = policy.prior_bad as u64
             + self.failed as u64
+            + self.refuted as u64
             + self.lied as u64 * policy.weight_of_a_lie as u64
             + self.silent as u64 * policy.weight_of_silence as u64;
         let total = good + bad;
@@ -79,12 +101,13 @@ impl Record {
 
     /// Whether anything has been proven against this worker.
     ///
-    /// Separate from the posterior on purpose. A failed canary or a proven lie is not evidence
-    /// to be weighed against other evidence — it is a wrong answer the coordinator *knows* was
-    /// wrong, and no amount of subsequent good behaviour makes it not have happened.
+    /// Separate from the posterior on purpose. A failed canary, a refuted result or a proven lie
+    /// is not evidence to be weighed against other evidence — it is a wrong answer the
+    /// coordinator *knows* was wrong, and no amount of subsequent good behaviour makes it not
+    /// have happened.
     #[must_use]
     pub const fn is_proven_wrong(&self) -> bool {
-        self.failed > 0 || self.lied > 0
+        self.failed > 0 || self.refuted > 0 || self.lied > 0
     }
 }
 
@@ -173,6 +196,8 @@ pub enum Standing {
     ProvenWrong {
         /// Canaries it got wrong.
         failed: u32,
+        /// Results the referee re-executed and found wrong.
+        refuted: u32,
         /// Disputes it was proven to have lied in.
         lied: u32,
     },
@@ -212,6 +237,7 @@ impl Reputation {
         if record.is_proven_wrong() {
             return Standing::ProvenWrong {
                 failed: record.failed,
+                refuted: record.refuted,
                 lied: record.lied,
             };
         }
@@ -253,6 +279,16 @@ impl Reputation {
     /// Record a canary answered incorrectly.
     pub fn failed_a_canary(&mut self, worker: &str) {
         self.entry(worker).failed += 1;
+    }
+
+    /// Record a result the referee re-executed and found wrong.
+    ///
+    /// This is the route that had no way to report anything until now: two volunteers disagree,
+    /// neither can argue, the referee executes the unit itself and knows which of them is wrong —
+    /// and the answer went into the unit's outcome and nowhere else. ADR-0015 named it as the
+    /// most valuable single gap left in that design, and this is the other end of it.
+    pub fn refuted(&mut self, worker: &str) {
+        self.entry(worker).refuted += 1;
     }
 
     /// Record a dispute this worker was proven to have lied in.
@@ -363,9 +399,102 @@ mod tests {
         );
         assert_eq!(
             reputation.standing("mallory"),
-            Standing::ProvenWrong { failed: 1, lied: 0 },
+            Standing::ProvenWrong {
+                failed: 1,
+                refuted: 0,
+                lied: 0
+            },
             "a thousand right answers un-did one known-wrong one"
         );
+    }
+
+    #[test]
+    fn a_refuted_result_costs_exactly_what_a_failed_canary_costs() {
+        // The claim in `Record::refuted`'s documentation, as arithmetic. Two workers with
+        // identical histories except for *how* the coordinator came to know they were wrong must
+        // end up indistinguishable, because what it knows about them is the same thing.
+        let policy = Policy::default();
+        let mut by_canary = Reputation::new(policy);
+        let mut by_referee = Reputation::new(policy);
+        for _ in 0..20 {
+            by_canary.passed_a_canary("a");
+            by_referee.passed_a_canary("b");
+        }
+        by_canary.failed_a_canary("a");
+        by_referee.refuted("b");
+
+        assert_eq!(
+            by_canary.record("a").posterior_permille(&policy),
+            by_referee.record("b").posterior_permille(&policy),
+            "the two kinds of known-wrong answer drifted apart in the posterior"
+        );
+        assert!(by_referee.record("b").is_proven_wrong());
+        assert_eq!(
+            by_referee.standing("b"),
+            Standing::ProvenWrong {
+                failed: 0,
+                refuted: 1,
+                lied: 0
+            },
+            "an operator cannot see which mechanism caught this"
+        );
+    }
+
+    #[test]
+    fn a_refuted_volunteer_starts_being_checked_hard_again() {
+        // What makes the counter more than bookkeeping. Twenty clean canaries buy the reduced
+        // rate the cost model is written around; one answer the referee could show was wrong
+        // takes it away, and the worker goes back to being checked at the untrusted rate.
+        //
+        // Written as a comparison against the rate this worker actually held rather than against
+        // the constant, so that changing a default shows up here as a different number instead of
+        // as a test that quietly stops meaning anything.
+        let policy = Policy::default();
+        let mut reputation = Reputation::new(policy);
+        for _ in 0..20 {
+            reputation.passed_a_canary("volunteer");
+        }
+        let while_trusted = reputation.canary_permille("volunteer");
+        assert!(matches!(
+            reputation.standing("volunteer"),
+            Standing::Trusted { .. }
+        ));
+
+        reputation.refuted("volunteer");
+
+        assert!(
+            reputation.canary_permille("volunteer") > while_trusted,
+            "a refuted volunteer is still checked as rarely as a trusted one"
+        );
+    }
+
+    #[test]
+    fn being_refuted_costs_far_less_than_losing_a_bisection() {
+        // The distinction the `refuted` counter exists to preserve. Being refuted says the
+        // *result* was wrong; losing a bisection says the party corrupted its own replay to
+        // defend it. A browser volunteer with a divergent engine reaches the first honestly and
+        // cannot reach the second at all, so collapsing them would put the project's own worst
+        // failure — convicting an honest volunteer — one code change away.
+        let policy = Policy::default();
+        let mut refuted = Reputation::new(policy);
+        let mut liar = Reputation::new(policy);
+        for _ in 0..20 {
+            refuted.passed_a_canary("unlucky");
+            liar.passed_a_canary("liar");
+        }
+        refuted.refuted("unlucky");
+        liar.lied("liar");
+
+        let unlucky_score = refuted.record("unlucky").posterior_permille(&policy);
+        let liar_score = liar.record("liar").posterior_permille(&policy);
+        assert!(
+            unlucky_score > liar_score,
+            "a refuted result {unlucky_score} should cost less than a lie {liar_score}"
+        );
+        // Both are still proven wrong, though: the coordinator knows each of them returned an
+        // answer it can show was not the answer. What differs is the weight, not the fact.
+        assert!(refuted.record("unlucky").is_proven_wrong());
+        assert!(liar.record("liar").is_proven_wrong());
     }
 
     #[test]

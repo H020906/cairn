@@ -27,6 +27,7 @@ done this way?"*
 | [0014](0014-the-coordinator-keeps-a-log-not-a-database.md) | The coordinator keeps a log, not a database | Accepted, amends 0002 |
 | [0015](0015-canaries-are-what-catch-a-cheat.md) | Canaries are what catch a cheat, and they are grounded in replication | Accepted, completes 0001 |
 | [0016](0016-math-belongs-in-the-module-not-the-host.md) | Math belongs in the module, not the host | Accepted, extends 0003 |
+| [0017](0017-a-verdict-nobody-can-read-is-not-a-verdict.md) | Give the re-execution route a typed verdict | Accepted, closes an open item in 0015 |
 
 ## Reading order
 
@@ -101,17 +102,26 @@ terms: canaries must be copied from *corroborated* units, corroboration comes fr
 laundering a cheat's answer into ground truth and then convicting honest volunteers for being
 right.
 
-Finally **0016**, which asks where a workload's `exp` comes from and finds that the obvious
-answer — import it from the host — would have made the grid convict honest volunteers on close
-to one `cbrt` call in three. It belongs with 0003 and 0006 as the third instalment of the same
-argument: the first two secured the arithmetic WebAssembly specifies, and this one covers the
-arithmetic it does not.
+**0016** asks where a workload's `exp` comes from and finds that the obvious answer — import it
+from the host — would have made the grid convict honest volunteers on close to one `cbrt` call in
+three. It belongs with 0003 and 0006 as the third instalment of the same argument: the first two
+secured the arithmetic WebAssembly specifies, and this one covers the arithmetic it does not.
 
 It also contains the most alarming single measurement in this repository, and it was not the one
 being looked for. For the worst-case argument in the format, the platform's own `sin` returns
 `-0.2227` where the answer is `1.0` — confirmed by exact integer arithmetic over a 3000-bit `pi`,
 by V8, and by this project's library, all three agreeing against it. Host math is not only
 inconsistent between hosts; it is not dependably correct on any of them.
+
+Finally **0017**, which closes the first item on 0015's own list of what it left undone. The route
+that settles a disagreement between two volunteers who cannot argue ends up holding the unit's true
+answer, so it knows which of them is wrong — and it reported that as an English sentence, which
+meant reputation never heard it. **A verdict nothing can read is not a verdict.** Read it for the
+distinction it spends most of its length defending: being refuted is a wrong *answer*, and losing a
+bisection is a wrong answer plus a party corrupting its own replay to defend it. The volunteers on
+the re-execution route are the ones that cannot argue, which is to say browsers, which is to say
+the volunteers this project is for — so charging them as liars would have been the failure every
+other decision here is arranged to avoid.
 
 ## Format
 

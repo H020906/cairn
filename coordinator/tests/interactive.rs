@@ -15,7 +15,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cairn_coordinator::dispute::{answer_honestly, Answer, Conclusion, Desk, Question};
+use cairn_coordinator::dispute::{
+    answer_honestly, Answer, Conclusion, Desk, Question, ReExecution,
+};
 use cairn_coordinator::grid::{Grid, Outcome, Submission};
 use cairn_runtime::dispute::Party;
 use cairn_runtime::engine::image;
@@ -587,11 +589,21 @@ fn a_volunteer_that_cannot_argue_is_never_challenged() {
         .submit_result(unit, blind("firefox", vec![0; 4]))
         .unwrap()
     {
-        Outcome::Settled { verdict, output } => {
-            assert!(verdict.contains("second party"), "{verdict}");
+        Outcome::Settled {
+            verdict,
+            refuted,
+            output,
+        } => {
+            assert_eq!(
+                verdict,
+                ReExecution::Refuted {
+                    wrong: Party::Second
+                }
+            );
+            assert_eq!(refuted, vec!["firefox".to_owned()]);
             assert!(
-                verdict.contains("re-execution"),
-                "the route must be stated: {verdict}"
+                verdict.to_string().contains("re-execution"),
+                "the route must still be stated in the prose: {verdict}"
             );
             assert_eq!(output, Some(expected(7)));
         }

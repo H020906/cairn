@@ -9,8 +9,10 @@
 
 use std::time::Instant;
 
+use cairn_coordinator::dispute::ReExecution;
 use cairn_coordinator::grid::{Grid, Outcome, Submission};
 use cairn_coordinator::journal::Entry;
+use cairn_runtime::dispute::Party;
 
 const WORKLOAD: &str = r#"
     (module
@@ -274,7 +276,10 @@ fn a_settled_verdict_survives_but_a_disputed_one_does_not() {
     let mut entries = queued(&[b"abcde", b"xy"]);
     entries.push(Entry::Settled {
         unit: 0,
-        verdict: "the second party was wrong".to_owned(),
+        verdict: ReExecution::Refuted {
+            wrong: Party::Second,
+        },
+        refuted: vec!["liar".to_owned()],
         output: Some(expected(5)),
     });
     entries.push(Entry::Disputed {
@@ -288,9 +293,40 @@ fn a_settled_verdict_survives_but_a_disputed_one_does_not() {
     assert_eq!(
         grid.unit(0).unwrap().outcome,
         Outcome::Settled {
-            verdict: "the second party was wrong".to_owned(),
+            verdict: ReExecution::Refuted {
+                wrong: Party::Second
+            },
+            refuted: vec!["liar".to_owned()],
             output: Some(expected(5)),
         }
     );
     assert_eq!(grid.unit(1).unwrap().outcome, Outcome::Open);
+}
+
+#[test]
+fn a_refutation_still_counts_against_a_volunteer_after_a_restart() {
+    // ADR-0015 listed this as an open limitation and ADR-0017 closes half of it. The referee's
+    // finding is a fact it already established, so replaying it is reading rather than
+    // re-deciding — ADR-0014's rule — and the worker names are in the entry precisely so that
+    // replay never has to work out which party was which.
+    let mut entries = queued(&[b"abcde"]);
+    entries.push(Entry::Settled {
+        unit: 0,
+        verdict: ReExecution::Refuted {
+            wrong: Party::Second,
+        },
+        refuted: vec!["liar".to_owned()],
+        output: Some(expected(5)),
+    });
+
+    let mut grid = Grid::new();
+    grid.restore(&entries).unwrap();
+
+    assert_eq!(grid.reputation().record("liar").refuted, 1);
+    assert!(grid.reputation().record("liar").is_proven_wrong());
+    assert_eq!(
+        grid.reputation().record("liar").lied,
+        0,
+        "a restart must not upgrade a refutation into a conviction"
+    );
 }

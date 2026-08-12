@@ -121,12 +121,14 @@ answers reaching the science needs replication on the units it cares about, not 
 
 What this costs, and what is still missing:
 
-- **Replication catches cheats and reputation never hears about it.** A disagreement between two
-  volunteers that cannot argue takes the re-execution route, which reports its verdict as prose —
-  there is no structured "this party was wrong" for a record to be made from. Fixing it means
-  giving `by_re_execution` a typed verdict, and it is the most valuable single thing left here.
-- **Dispute-derived reputation does not survive a restart.** Canary outcomes are journalled;
-  verdicts are not, for the reason ADR-0014 gives.
+- ~~**Replication catches cheats and reputation never hears about it.**~~ **Closed by
+  [ADR-0017](0017-a-verdict-nobody-can-read-is-not-a-verdict.md).** The re-execution route reported
+  its verdict as prose, so there was no structured "this party was wrong" for a record to be made
+  from. `by_re_execution` now returns a typed verdict and the grid charges the volunteer it names —
+  as a wrong answer, never as a lie, for the reason that ADR spends most of its length on.
+- **Dispute-derived reputation does not survive a restart — still true of *bisection*.**
+  ADR-0017 closed half of this: canary outcomes were already journalled and re-execution verdicts
+  now are too. A conviction is not, because it is reached in a sweep that has no journal in scope.
 - **Collusion defeats this**, as ADR-0001 says. Two volunteers who share inputs and answers will
   recognise a canary, because one of them produced the source unit's answer.
 - **A cheat that is caught is not punished.** It is checked harder, and that is all. Cairn has no

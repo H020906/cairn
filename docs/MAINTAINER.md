@@ -82,9 +82,18 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
 - **No dashboard.** `web/` does not exist. `GET /api/status` is what there is.
 - **The coordinator exists but is not the one ARCHITECTURE originally described.**
   `coordinator/` has registration, a work queue, expiring leases, one-volunteer-one-vote, a
-  replication rate, a referee, and the interactive dispute protocol. It has **no reputation, no
-  canaries and no penalties** — a verdict distinguishes a proven lie from an abandonment, ADR-0001
-  wants those to cost a volunteer very differently, and nothing yet acts on the difference.
+  replication rate, a referee, the interactive dispute protocol, and — since
+  [ADR-0015](adr/0015-canaries-are-what-catch-a-cheat.md) — canaries and reputation. What it has
+  **no** notion of is **penalties**: a volunteer caught by any route is checked harder, from 30‰ to
+  250‰, and that is the whole of the consequence. Excluding one is a policy with effects on real
+  people and it needs an operator, not a constant.
+- **A wrong answer and a lie are different findings, and the difference is the point.** A result
+  the referee re-executed and disproved is *wrong*, weighing one failed canary; losing a bisection
+  is a wrong answer **plus** a party corrupting its own replay to defend it, weighing twenty. The
+  volunteers reachable only by the first route are the ones that cannot argue — every browser — so
+  collapsing the two would convict honest volunteers for an engine divergence. See
+  [ADR-0017](adr/0017-a-verdict-nobody-can-read-is-not-a-verdict.md), which exists because that
+  route reported its finding as an English sentence and reputation therefore never heard it.
 - **Two dispute routes, and mixing them up is the easiest way to misdescribe this project.**
   Bisection needs *both* parties to have declared they can argue (`Submission::bisects`); a
   volunteer that cannot produce state roots — every browser — is settled for by re-execution

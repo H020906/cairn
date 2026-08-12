@@ -269,8 +269,23 @@ re-executes the unit itself. That fallback is a **route, not a gap**: challengin
 cannot answer would convict it for silence. See
 [ADR-0011](docs/adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
 
-What it does not have: **reputation, canaries, and penalties.** A verdict names who lied and who
-went quiet; nothing yet acts on the difference.
+**Canaries and reputation exist**
+([ADR-0015](docs/adr/0015-canaries-are-what-catch-a-cheat.md)): a fraction of the units a volunteer
+is handed have known answers, and the fraction is set per worker by what has been observed about
+it — 30‰ once trusted, 250‰ until then. Every route that establishes something about a volunteer
+now reports it in a form reputation can act on, including the re-execution route, which reported
+its verdict as prose until
+[ADR-0017](docs/adr/0017-a-verdict-nobody-can-read-is-not-a-verdict.md).
+
+**Three things a volunteer can be shown to have done, and they are deliberately not one thing.**
+A *refuted* result is wrong, and that is all it is — the referee executed the unit and holds the
+answer, but a browser volunteer with a divergent engine gets there honestly. A *conviction* is a
+wrong answer plus a party corrupting its own replay to defend it, and it weighs twenty times as
+much. *Silence* is neither: volunteers close laptops.
+
+What it does not have: **penalties.** A volunteer caught by any of the three is checked harder and
+nothing else. Excluding one is a policy with consequences for real people, and it needs an
+operator rather than a constant.
 
 It does not have a database either, and that is now a decision rather than a gap: state is
 rebuilt from an append-only journal, because every read in the coordinator is a scan of an

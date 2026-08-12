@@ -254,8 +254,109 @@ pub enum Conclusion {
         /// Why bisection did not settle it, in the protocol's own words.
         why: String,
         /// What re-execution concluded.
-        verdict: String,
+        ///
+        /// **Typed, and that is the point of it.** Until ADR-0017 this was prose, so a route that
+        /// had just established which volunteer returned a wrong answer had no way to say so to
+        /// anything but a log reader.
+        verdict: ReExecution,
     },
+}
+
+/// What executing the unit here proved about the two parties.
+///
+/// # Why this is a type and not a sentence
+///
+/// The referee reaches this route holding something valuable: the unit's true answer, worked out
+/// by running it. Comparing that against what the parties submitted identifies a volunteer whose
+/// result is wrong, with the same certainty a canary gives and without needing either party to
+/// argue. [ADR-0015] shipped that route reporting its finding as a `String`, so
+/// [`crate::reputation`] never heard about it — the one gap that ADR named by name.
+///
+/// # What it does and does not establish
+///
+/// **It proves the result wrong. It proves nothing about intent.** A browser volunteer whose
+/// engine diverges from Cairn's interpreter returns a wrong answer in perfect good faith, and
+/// that volunteer is who this project is for. So a refutation is weighed as a failed check, never
+/// as a lie; only losing a bisection shows a party corrupting its own replay, and only that is
+/// [`Conclusion::Convicted`]. Collapsing the two would put this project's worst failure — an
+/// honest volunteer convicted — one careless edit away.
+///
+/// [ADR-0015]: ../../docs/adr/0015-canaries-are-what-catch-a-cheat.md
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReExecution {
+    /// One party's result matched the referee's own execution and the other's did not.
+    ///
+    /// The ordinary outcome, and the one worth having: an answer for the unit and a name for the
+    /// volunteer that got it wrong.
+    Refuted {
+        /// The party the referee's execution contradicts.
+        wrong: Party,
+    },
+    /// Neither result matched the unit as assigned.
+    ///
+    /// Both parties are wrong and neither answer is accepted. Rarer than it sounds — it takes two
+    /// volunteers failing on the same unit in two different ways.
+    BothRefuted,
+    /// The referee could not produce an answer of its own, so nothing is proven about anybody.
+    ///
+    /// Two causes, deliberately not distinguished here because they call for the same silence:
+    /// the disputed module would not decode, which means the coordinator is broken rather than
+    /// any volunteer; or executing it trapped, which means the referee holds no answer to compare
+    /// against. **Inferring "then both parties are wrong" from a trap would be charging
+    /// volunteers for the referee's own failure to finish**, and a trap can come from limits that
+    /// differ from the ones the volunteers ran under.
+    NoAnswer,
+    /// Both results matched, so there was no disagreement to settle.
+    ///
+    /// Unreachable through [`crate::grid`], which routes here only on differing outputs. Kept
+    /// because this function is public and a caller can hand it anything.
+    NotADisagreement,
+}
+
+impl ReExecution {
+    /// The parties this refuted, which is what a caller records against a volunteer.
+    ///
+    /// Empty when nothing was established. Returning a slice rather than an `Option<Party>` is
+    /// what keeps [`Self::BothRefuted`] from being quietly dropped by a caller that only handled
+    /// the single-party case.
+    #[must_use]
+    pub const fn refuted(self) -> &'static [Party] {
+        match self {
+            Self::Refuted {
+                wrong: Party::First,
+            } => &[Party::First],
+            Self::Refuted {
+                wrong: Party::Second,
+            } => &[Party::Second],
+            Self::BothRefuted => &[Party::First, Party::Second],
+            Self::NoAnswer | Self::NotADisagreement => &[],
+        }
+    }
+
+    /// Whether the referee reached an answer it is prepared to stand behind.
+    #[must_use]
+    pub const fn is_decisive(self) -> bool {
+        matches!(self, Self::Refuted { .. })
+    }
+}
+
+impl core::fmt::Display for ReExecution {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let verdict = match self {
+            Self::Refuted {
+                wrong: Party::First,
+            } => "the first party was wrong",
+            Self::Refuted {
+                wrong: Party::Second,
+            } => "the second party was wrong",
+            Self::BothRefuted => "neither party's result matches the unit as assigned",
+            Self::NoAnswer => "the unit could not be executed for adjudication",
+            Self::NotADisagreement => {
+                "inconsistent — both results match, so this was not a disagreement"
+            }
+        };
+        write!(f, "{verdict} (settled by re-execution, not by bisection)")
+    }
 }
 
 impl Conclusion {
@@ -374,7 +475,7 @@ fn preside(
         return (
             Conclusion::FellBack {
                 why: "the disputed module could not be decoded".to_owned(),
-                verdict: "no verdict is possible".to_owned(),
+                verdict: ReExecution::NoAnswer,
             },
             None,
         );
@@ -606,7 +707,10 @@ fn settle_by_agreed_answer(
 /// is the exact cost the design exists to avoid. So this does the cheap honest thing and the
 /// verdict says which route produced it.
 ///
-/// Returns the verdict in words and the answer the referee is prepared to stand behind.
+/// Returns what this established about the parties, and the answer the referee stands behind.
+///
+/// The verdict is a [`ReExecution`] rather than a sentence so that a caller can act on it — see
+/// that type for why the distinction between *wrong* and *lying* is load-bearing here.
 ///
 /// [ADR-0005]: ../../docs/adr/0005-the-fast-path-cannot-snapshot.md
 #[must_use]
@@ -614,33 +718,29 @@ pub fn by_re_execution(
     image: &image::Image<'_>,
     input: &[u8],
     outputs: &[Vec<u8>; 2],
-) -> (String, Option<Vec<u8>>) {
+) -> (ReExecution, Option<Vec<u8>>) {
     // Judged against the unit *as assigned*. Judging against anything else produces a
     // well-formed verdict for a different question, which is a mistake worth remembering
     // because it looks like an answer.
     let Some(truth) = honest_output(image, input) else {
-        return (
-            "the unit could not be executed for adjudication".to_owned(),
-            None,
-        );
+        return (ReExecution::NoAnswer, None);
     };
 
     let matches_first = outputs.first().is_some_and(|o| *o == truth);
     let matches_second = outputs.get(1).is_some_and(|o| *o == truth);
 
     let verdict = match (matches_first, matches_second) {
-        (true, false) => format!("the {} was wrong", Party::Second),
-        (false, true) => format!("the {} was wrong", Party::First),
-        (false, false) => "neither party's result matches the unit as assigned".to_owned(),
-        (true, true) => {
-            "inconsistent — both results match, so this was not a disagreement".to_owned()
-        }
+        (true, false) => ReExecution::Refuted {
+            wrong: Party::Second,
+        },
+        (false, true) => ReExecution::Refuted {
+            wrong: Party::First,
+        },
+        (false, false) => ReExecution::BothRefuted,
+        (true, true) => ReExecution::NotADisagreement,
     };
 
-    (
-        format!("{verdict} (settled by re-execution, not by bisection)"),
-        Some(truth),
-    )
+    (verdict, Some(truth))
 }
 
 /// Execute the unit as assigned, for the answer the referee is prepared to stand behind.

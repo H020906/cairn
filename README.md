@@ -346,6 +346,7 @@ plainly rather than left implied by unticked boxes.
 | **Coordinator: persistence** | **Done** — an append-only journal, not a database. Killed outright mid-run and restarted: 60 units, 60 executed, nothing lost and nothing repeated |
 | Coordinator: heartbeats, log compaction | Not started — the journal only grows |
 | **Verification policy: canaries + reputation** | **Done** — the first mechanism that catches a cheat without a second volunteer. Measured: a cheat is caught in 3–21 units at ordinary rates, and one cheating 1% of the time usually is not |
+| **Every route that catches a wrong answer now reports it** | **Done** — the referee re-executes a unit when neither party can argue, which tells it exactly who was wrong; it used to say so in an English sentence that nothing could read. It is charged as a wrong answer and never as a lie, because the volunteers on that route are browsers |
 | Penalties | Not started, deliberately — a caught volunteer is checked harder and nothing else. Excluding somebody needs an operator, not a constant |
 | **Deterministic math for workloads** | **Done** — `cairn-math`, 26 functions, no dependencies, built from nothing but the arithmetic WebAssembly pins down. Within 1–2 units in the last place of the platform over 200,000 samples each, and **identical bits** on all four engines. It also gets the format's worst case right where the platform does not |
 | Dashboard + live globe | Not started |

@@ -147,9 +147,17 @@ fn entries_for(grid: &Grid, unit: usize, submission: &Submission, outcome: &Outc
             unit,
             output: output.clone(),
         }),
-        Outcome::Settled { verdict, output } => entries.push(Entry::Settled {
+        Outcome::Settled {
+            verdict,
+            refuted,
+            output,
+        } => entries.push(Entry::Settled {
             unit,
-            verdict: verdict.clone(),
+            verdict: *verdict,
+            // Carried through so a restarted coordinator charges these volunteers again. Without
+            // it the referee's finding would survive as a sentence in a file and as nothing that
+            // reputation could act on, which is the shape of the bug ADR-0017 exists to fix.
+            refuted: refuted.clone(),
             output: output.clone(),
         }),
         // Both names, read back off the dispute the grid just opened. The obvious shortcut —
@@ -569,9 +577,16 @@ fn verdict_fields(conclusion: Option<&Conclusion>) -> String {
             "null".to_owned(),
             "nothing",
         ),
-        Some(Conclusion::FellBack { .. }) => (
+        // `atFault` is populated here since ADR-0017. Re-execution establishes which party was
+        // wrong just as definitely as bisection does — less about *why*, but this field is about
+        // who. `BothRefuted` stays null for the same reason `BothWrong` does: the field names one
+        // party, and saying "the first" when both were wrong would be worse than saying nothing.
+        Some(Conclusion::FellBack { verdict, .. }) => (
             "fell-back",
-            "null".to_owned(),
+            match verdict.refuted() {
+                [only] => party_index(*only),
+                _ => "null".to_owned(),
+            },
             "null".to_owned(),
             "the-whole-unit",
         ),
@@ -672,16 +687,21 @@ fn reputation(grid: &Arc<Mutex<Grid>>, request: Request) -> Result<(), String> {
                     Standing::Unproven { needs } => {
                         format!(r#"{{"kind":"unproven","canariesNeeded":{needs}}}"#)
                     }
-                    Standing::ProvenWrong { failed, lied } => format!(
-                        r#"{{"kind":"provenWrong","failedCanaries":{failed},"provenLies":{lied}}}"#
+                    Standing::ProvenWrong {
+                        failed,
+                        refuted,
+                        lied,
+                    } => format!(
+                        r#"{{"kind":"provenWrong","failedCanaries":{failed},"refutedResults":{refuted},"provenLies":{lied}}}"#
                     ),
                 };
                 format!(
-                    r#"{{"worker":"{}","accepted":{},"canariesPassed":{},"canariesFailed":{},"lies":{},"silences":{},"checkedEvery":{},"standing":{standing}}}"#,
+                    r#"{{"worker":"{}","accepted":{},"canariesPassed":{},"canariesFailed":{},"refuted":{},"lies":{},"silences":{},"checkedEvery":{},"standing":{standing}}}"#,
                     escape(name),
                     record.accepted,
                     record.passed,
                     record.failed,
+                    record.refuted,
                     record.lied,
                     record.silent,
                     reputation.canary_permille(name),
@@ -740,9 +760,20 @@ fn describe(grid: &Grid, outcome: &Outcome) -> String {
         Outcome::Accepted { output } => {
             format!(r#"{{"state":"accepted","output":"{}"}}"#, hex(output))
         }
-        Outcome::Settled { verdict, output } => format!(
-            r#"{{"state":"settled","by":"re-execution","verdict":"{}","output":"{}"}}"#,
-            escape(verdict),
+        // `refuted` is the names, not the party positions, because this is the one route where a
+        // caller has no `parties` array to index into — the argument never happened.
+        Outcome::Settled {
+            verdict,
+            refuted,
+            output,
+        } => format!(
+            r#"{{"state":"settled","by":"re-execution","verdict":"{}","refuted":[{}],"output":"{}"}}"#,
+            escape(&verdict.to_string()),
+            refuted
+                .iter()
+                .map(|who| format!(r#""{}""#, escape(who)))
+                .collect::<Vec<_>>()
+                .join(","),
             output.as_ref().map(|o| hex(o)).unwrap_or_default()
         ),
         Outcome::Disputed { dispute } => {
