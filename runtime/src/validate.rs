@@ -9,9 +9,11 @@
 //! **Rule two: nothing we cannot commit to.** The execution trace is a Merkle commitment over
 //! linear memory, globals and the value stack. Every value in that state must be hashable in a
 //! host-independent way. `externref` and `funcref` are opaque host references — there is no
-//! meaningful way to hash one, so a module that can place one on the stack cannot be
-//! committed to at all. This is why reference types are rejected, and it is a structural
-//! reason rather than a scheduling one.
+//! meaningful way to hash one, so a module that can place one on the stack cannot be committed to
+//! at all. This is a structural reason rather than a scheduling one, and it is enforced by
+//! [`Rejection::ReferenceValue`] and [`Rejection::ReferenceInstruction`] rather than by the
+//! feature gate: see [`admitted_features`] for why the reference-types *proposal* is admitted
+//! even though a reference *value* is not.
 //!
 //! # The allowlist is the interpreter's coverage
 //!
@@ -20,6 +22,12 @@
 //! later be unable to arbitrate — the failure mode where a dispute arrives and the coordinator
 //! discovers it cannot replay the disputed instruction. When the interpreter gains an
 //! instruction family, this list grows in the same commit, and not before.
+//!
+//! **Where a proposal is admitted for part of itself, the structural pass draws the rest of the
+//! line** — and it must refuse at the gate rather than leave the interpreter to trap. A trap is
+//! Cairn's own invariant failure and no other engine raises it, so a module Cairn traps on and
+//! wasmtime completes is a dispute that convicts the honest volunteer. ADR-0018 is that argument
+//! written out; `3b2ebcb` is what it looks like when it actually happens.
 //!
 //! # A note on floating point
 //!
@@ -84,11 +92,39 @@ pub const MEMORY_EXPORT: &str = "memory";
 /// |---|---|
 /// | threads, shared-everything-threads, stack-switching | nondeterministic by construction |
 /// | relaxed SIMD | nondeterministic by explicit design of the proposal |
-/// | reference types, GC, function references | host-opaque values cannot enter a state commitment |
+/// | GC, function references | host-opaque values cannot enter a state commitment |
 /// | custom page sizes, memory control | the memory commitment assumes 64 KiB pages |
 /// | multi-memory | one memory means one page tree |
 /// | SIMD, tail call, exceptions, memory64, extended const, wide arithmetic | deterministic, but not yet implemented by the interpreter |
 /// | component model | not a core module |
+///
+/// # Reference types are admitted for their *encoding* and refused for their *values*
+///
+/// This is the one entry that is not a straight yes or no, and the reason is empirical. Compile
+/// any Rust program containing a trait object or a function pointer to `wasm32-unknown-unknown`
+/// and the `call_indirect` it emits carries its table index as a **padded five-byte LEB128**:
+///
+/// ```text
+/// 11 80 80 80 80 00 80 80 80 80 00      call_indirect (type 0) (table 0)
+/// ```
+///
+/// The base specification requires a single zero byte in that position. The multi-byte form is
+/// legal only under the reference-types proposal, so without it `wasmparser` reports
+/// `zero byte expected` and the module is refused — **even though the table index is zero, the
+/// module declares one table, and no reference ever reaches a value position.** That refusal is
+/// about how a zero is spelled, and it excluded most non-trivial compiler output.
+///
+/// So the feature is enabled and the structural pass takes over what the feature gate used to do,
+/// which is the stronger arrangement in any case: it refuses a reference *value* anywhere
+/// ([`Rejection::ReferenceValue`]), a second table ([`Rejection::MultipleTables`]), a table of
+/// anything but functions ([`Rejection::NonFunctionTable`]), and every instruction that touches a
+/// reference or mutates a table ([`Rejection::ReferenceInstruction`]).
+///
+/// **What survives from the old blanket refusal is the property that mattered.** No `funcref` or
+/// `externref` can reach the operand stack, a local, or a global, so [`crate::state::Value`] still
+/// needs no case for one. And because every table-mutating instruction is refused, the table is
+/// fixed once its element segments are applied — which is what lets `StateCommitment` leave the
+/// table out.
 #[must_use]
 pub fn admitted_features() -> WasmFeatures {
     WasmFeatures::MUTABLE_GLOBAL
@@ -97,6 +133,43 @@ pub fn admitted_features() -> WasmFeatures {
         | WasmFeatures::MULTI_VALUE
         | WasmFeatures::BULK_MEMORY
         | WasmFeatures::FLOATS
+        | WasmFeatures::REFERENCE_TYPES
+}
+
+/// Whether a value type is a reference, and therefore cannot be committed to.
+const fn is_reference(ty: ValType) -> bool {
+    matches!(ty, ValType::Ref(_))
+}
+
+/// Whether an instruction reads, writes or creates a reference.
+///
+/// **Enumerated rather than pattern-matched on a name prefix, and the feature gate is what makes
+/// that safe.** An operator can only appear in an admitted module if the proposal that defines it
+/// is in [`admitted_features`], so this list has to cover exactly one proposal's instructions
+/// rather than every instruction `wasmparser` knows. A future proposal that adds another
+/// table-mutating instruction cannot reach here without somebody first enabling its feature, and
+/// that edit is where the decision belongs.
+///
+/// `elem.drop` is deliberately absent: it is bulk memory rather than reference types, the
+/// interpreter implements it, and dropped segments are part of the state commitment already.
+fn touches_a_reference(op: &wasmparser::Operator<'_>) -> bool {
+    use wasmparser::Operator as Op;
+    match op {
+        Op::RefNull { .. }
+        | Op::RefIsNull
+        | Op::RefFunc { .. }
+        | Op::TableGet { .. }
+        | Op::TableSet { .. }
+        | Op::TableSize { .. }
+        | Op::TableGrow { .. }
+        | Op::TableFill { .. }
+        | Op::TableCopy { .. }
+        | Op::TableInit { .. } => true,
+        // A `select` carrying an explicit type is only a problem when that type is a reference.
+        // The untyped `select` cannot be one: the base specification restricts it to numbers.
+        Op::TypedSelect { ty } => is_reference(*ty),
+        _ => false,
+    }
 }
 
 /// Structural ceilings applied on top of the feature gate.
@@ -210,6 +283,45 @@ pub enum Rejection {
         /// The export that was expected.
         name: String,
     },
+    /// A reference type appears somewhere a value can be, which no state commitment can cover.
+    ///
+    /// **This is the structural half of admitting the reference-types proposal.** The feature is
+    /// enabled because every current toolchain encodes `call_indirect`'s table index as a LEB128
+    /// integer, which the proposal permits and the base specification does not — see
+    /// [`admitted_features`]. That is an *encoding*, and it is all Cairn wants from the proposal.
+    ///
+    /// What Cairn cannot have is a reference as a **value**. A `funcref` or `externref` on the
+    /// operand stack, in a local, or in a global has no host-independent representation, so
+    /// [`crate::state::Value`] cannot hold one and a trace commitment cannot cover one. Admitting
+    /// the encoding without this check would admit the values too.
+    ReferenceValue {
+        /// Where it appeared, for a human: `"a global"`, `"function type 3"`, and so on.
+        at: String,
+    },
+    /// More than one table.
+    ///
+    /// Multiple tables arrive with reference types, and the interpreter has exactly one — its
+    /// `call_indirect` resolves against that one and ignores the table index in the instruction.
+    /// A second table would therefore be indexed correctly by every other engine and incorrectly
+    /// by Cairn, which is a consensus divergence rather than a missing feature.
+    MultipleTables,
+    /// A table of something other than functions.
+    ///
+    /// The table is the only place a reference is allowed to live, because it is not a value
+    /// there — it is the target space `call_indirect` selects from, and the interpreter stores
+    /// function *indices*. A table of `externref` would be host-opaque storage.
+    NonFunctionTable,
+    /// An instruction that reads, writes or creates a reference.
+    ///
+    /// `ref.func`, `ref.null`, `table.get`, `table.set` and the rest. Every one of them either
+    /// puts a reference where a value goes or mutates the table, and the table is deliberately
+    /// outside the state commitment on the grounds that nothing can change it. **Refused at the
+    /// gate rather than left to trap**, because a trap in Cairn's interpreter against an engine
+    /// that executes the instruction happily is precisely how an honest volunteer is convicted.
+    ReferenceInstruction {
+        /// The instruction, as `wasmparser` names it.
+        operator: String,
+    },
 }
 
 impl fmt::Display for Rejection {
@@ -280,6 +392,26 @@ impl fmt::Display for Rejection {
             Self::MissingExport { name } => {
                 write!(f, "module does not export `{name}`")
             }
+            Self::ReferenceValue { at } => write!(
+                f,
+                "a reference type appears in {at}; references have no host-independent \
+                 representation, so no state commitment can cover one"
+            ),
+            Self::MultipleTables => write!(
+                f,
+                "module declares more than one table; the interpreter resolves `call_indirect` \
+                 against a single table and ignores the instruction's table index"
+            ),
+            Self::NonFunctionTable => write!(
+                f,
+                "a table holds something other than functions; the table is the one place a \
+                 reference may live, and only because `call_indirect` selects from it"
+            ),
+            Self::ReferenceInstruction { operator } => write!(
+                f,
+                "`{operator}` reads, writes or creates a reference, which cannot enter a state \
+                 commitment; the table is fixed once its element segments are applied"
+            ),
         }
     }
 }
@@ -416,6 +548,22 @@ fn inspect(bytes: &[u8], limits: Limits) -> Result<ModuleFacts, Rejection> {
                     for sub in group.into_types() {
                         match sub.composite_type.inner {
                             CompositeInnerType::Func(ft) => {
+                                // Every function signature in the module passes through here, so
+                                // this is where a reference reaching a parameter or a result is
+                                // caught — the two positions a `funcref` would arrive in if a
+                                // toolchain started passing function pointers as values rather
+                                // than as table indices.
+                                let index = func_types.len();
+                                if let Some(ty) = ft
+                                    .params()
+                                    .iter()
+                                    .chain(ft.results())
+                                    .find(|ty| is_reference(**ty))
+                                {
+                                    return Err(Rejection::ReferenceValue {
+                                        at: format!("function type {index} ({ty:?})"),
+                                    });
+                                }
                                 func_types.push((ft.params().to_vec(), ft.results().to_vec()));
                             }
                             // Array and struct types belong to the GC proposal, which the
@@ -499,6 +647,80 @@ fn inspect(bytes: &[u8], limits: Limits) -> Result<ModuleFacts, Rejection> {
             }
 
             Payload::StartSection { .. } => return Err(Rejection::StartSection),
+
+            // The table is the one place a reference is allowed, and only in the narrow sense
+            // that `call_indirect` selects from it. One table, holding functions, and nothing
+            // that can change it — see `touches_a_reference`.
+            Payload::TableSection(reader) => {
+                let mut seen = 0;
+                for table in reader {
+                    let table = table.map_err(|e| Rejection::Invalid {
+                        detail: e.to_string(),
+                    })?;
+                    seen += 1;
+                    if seen > 1 {
+                        return Err(Rejection::MultipleTables);
+                    }
+                    if !table.ty.element_type.is_func_ref() {
+                        return Err(Rejection::NonFunctionTable);
+                    }
+                }
+            }
+
+            // A global holds a value between instructions and `StateCommitment` hashes every one
+            // of them, so a reference here is the plainest form of the thing that cannot be
+            // committed to.
+            Payload::GlobalSection(reader) => {
+                for (index, global) in reader.into_iter().enumerate() {
+                    let global = global.map_err(|e| Rejection::Invalid {
+                        detail: e.to_string(),
+                    })?;
+                    if is_reference(global.ty.content_type) {
+                        return Err(Rejection::ReferenceValue {
+                            at: format!("global {index}"),
+                        });
+                    }
+                }
+            }
+
+            // Locals and instructions. This is the pass that the feature gate used to make
+            // unnecessary: with reference types enabled for their encoding, `ref.func` and
+            // `table.set` now *parse*, and refusing them is this function's job.
+            //
+            // Refused here rather than left to trap in the interpreter. Every other engine
+            // executes these instructions perfectly well, so a module carrying one would run to
+            // completion for a volunteer and trap for the referee — which convicts the volunteer.
+            Payload::CodeSectionEntry(body) => {
+                let locals = body.get_locals_reader().map_err(|e| Rejection::Invalid {
+                    detail: e.to_string(),
+                })?;
+                for local in locals {
+                    let (_, ty) = local.map_err(|e| Rejection::Invalid {
+                        detail: e.to_string(),
+                    })?;
+                    if is_reference(ty) {
+                        return Err(Rejection::ReferenceValue {
+                            at: format!("a local ({ty:?})"),
+                        });
+                    }
+                }
+
+                let operators = body
+                    .get_operators_reader()
+                    .map_err(|e| Rejection::Invalid {
+                        detail: e.to_string(),
+                    })?;
+                for op in operators {
+                    let op = op.map_err(|e| Rejection::Invalid {
+                        detail: e.to_string(),
+                    })?;
+                    if touches_a_reference(&op) {
+                        return Err(Rejection::ReferenceInstruction {
+                            operator: format!("{op:?}"),
+                        });
+                    }
+                }
+            }
 
             Payload::ExportSection(reader) => {
                 for export in reader {
@@ -735,18 +957,192 @@ mod tests {
         assert!(matches!(err, Rejection::Invalid { .. }), "got {err:?}");
     }
 
+    // --- Reference types: the encoding is admitted, the values are not -------------------
+    //
+    // These used to be one test asserting the whole proposal was refused by the feature gate.
+    // That refusal also excluded most compiler output, for a reason that turned out to be
+    // about how a zero is spelled — see `admitted_features`. The proposal is now enabled and
+    // the rules below are structural, so each of them names the position it protects.
+
+    /// A LEB128 unsigned integer, appended.
+    fn leb(out: &mut Vec<u8>, mut value: u32) {
+        loop {
+            let byte = (value & 0x7f) as u8;
+            value >>= 7;
+            out.push(if value == 0 { byte } else { byte | 0x80 });
+            if value == 0 {
+                return;
+            }
+        }
+    }
+
+    /// A section: its id, its payload's length, its payload.
+    fn section(out: &mut Vec<u8>, id: u8, payload: &[u8]) {
+        out.push(id);
+        leb(out, payload.len() as u32);
+        out.extend_from_slice(payload);
+    }
+
     #[test]
-    fn rejects_reference_types() {
-        // The structural rejection: an externref cannot be hashed into a state commitment in
-        // a host-independent way, so a module that can put one on the stack cannot be
-        // committed to at all.
+    fn accepts_the_call_indirect_every_current_toolchain_emits() {
+        // The finding this whole change came from. `rustc` writes `call_indirect`'s table index
+        // as a **padded five-byte LEB128**, which the base specification does not permit in that
+        // position, so the module was refused with `zero byte expected` — with one table, index
+        // zero, and no reference anywhere near a value.
+        //
+        // Assembled byte by byte rather than from `.wat`, because the text format cannot express
+        // the padding: `wat` emits the single-byte form, which is exactly the form that already
+        // worked. Splicing the extra bytes into an assembled module does not work either — it
+        // invalidates the two length prefixes above it, which is how the first version of this
+        // test failed with `malformed section id`.
+        let mut types = vec![1u8, 0x60, 0x00, 0x00]; // one type: () -> ()
+        let functions = vec![2u8, 0x00, 0x00]; // two functions, both of type 0
+        let tables = vec![1u8, 0x70, 0x01, 0x01, 0x01]; // one funcref table, 1..=1
+        let memories = vec![1u8, 0x01, 0x01, 0x01]; // one memory, 1..=1
+        let mut exports = vec![2u8];
+        exports.extend_from_slice(b"\x06memory\x02\x00");
+        exports.extend_from_slice(b"\x09cairn_run\x00\x01");
+        let elements = vec![1u8, 0x00, 0x41, 0x00, 0x0b, 0x01, 0x00]; // table[0] = func 0
+
+        let target = [0x00u8, 0x0b]; // no locals, end
+        let caller = [
+            0x00, // no locals
+            0x41, 0x00, // i32.const 0
+            0x11, 0x00, // call_indirect, type 0
+            0x80, 0x80, 0x80, 0x80, 0x00, // table 0, the way a compiler spells it
+            0x0b, // end
+        ];
+        let mut code = vec![2u8];
+        for body in [&target[..], &caller[..]] {
+            leb(&mut code, body.len() as u32);
+            code.extend_from_slice(body);
+        }
+
+        let mut module = b"\0asm\x01\0\0\0".to_vec();
+        section(&mut module, 1, &types);
+        section(&mut module, 3, &functions);
+        section(&mut module, 4, &tables);
+        section(&mut module, 5, &memories);
+        section(&mut module, 7, &exports);
+        section(&mut module, 9, &elements);
+        section(&mut module, 10, &code);
+
+        validate_submitted(&module, Limits::default())
+            .expect("the padded form is what every real workload arrives in");
+
+        // And the single-byte form still works, so this widened the gate rather than moving it.
+        types.clear();
+        let mut narrow = b"\0asm\x01\0\0\0".to_vec();
+        section(&mut narrow, 1, &[1u8, 0x60, 0x00, 0x00]);
+        section(&mut narrow, 3, &functions);
+        section(&mut narrow, 4, &tables);
+        section(&mut narrow, 5, &memories);
+        section(&mut narrow, 7, &exports);
+        section(&mut narrow, 9, &elements);
+        let mut narrow_code = vec![2u8];
+        let short_caller = [0x00u8, 0x41, 0x00, 0x11, 0x00, 0x00, 0x0b];
+        for body in [&target[..], &short_caller[..]] {
+            leb(&mut narrow_code, body.len() as u32);
+            narrow_code.extend_from_slice(body);
+        }
+        section(&mut narrow, 10, &narrow_code);
+        validate_submitted(&narrow, Limits::default())
+            .expect("the spelling the specification requires must still be admitted");
+    }
+
+    #[test]
+    fn rejects_a_reference_reaching_a_value_position() {
+        // The property the blanket refusal used to buy, kept. A reference has no
+        // host-independent representation, so `state::Value` has no case for one and a trace
+        // commitment cannot cover one — in a parameter, a result, a local or a global.
+        //
+        // All `funcref`, because `externref` turns out to need the GC feature in this
+        // `wasmparser`, so the feature gate refuses it before this pass sees it. That makes
+        // these rules narrower in practice than they read, and they are written to stand on
+        // their own anyway — the same reasoning `Rejection`'s own documentation gives for
+        // keeping `Memory64` and `CustomPageSize`.
+        for source in [
+            r#"(module (memory (export "memory") 1 1)
+                 (func (export "cairn_run"))
+                 (func (param funcref)))"#,
+            r#"(module (memory (export "memory") 1 1)
+                 (func (export "cairn_run"))
+                 (func (result funcref) (ref.null func)))"#,
+            r#"(module (memory (export "memory") 1 1)
+                 (global (mut funcref) (ref.null func))
+                 (func (export "cairn_run")))"#,
+            r#"(module (memory (export "memory") 1 1)
+                 (func (export "cairn_run") (local funcref)))"#,
+        ] {
+            let err = check(source).unwrap_err();
+            assert!(
+                matches!(err, Rejection::ReferenceValue { .. }),
+                "got {err:?} for {source}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_every_instruction_that_could_change_the_table() {
+        // `StateCommitment` does not cover the table, and the reason it does not need to is
+        // that nothing can change it once its element segments are applied. These instructions
+        // are what would make that false, so refusing them is what keeps the commitment honest.
+        //
+        // Refused at the gate rather than left to trap in the interpreter. Every other engine
+        // runs them, so a module carrying one completes for a volunteer and traps for the
+        // referee — and the referee convicts the volunteer.
+        for body in [
+            "(drop (table.get (i32.const 0)))",
+            "(table.set (i32.const 0) (ref.null func))",
+            "(drop (table.size))",
+            "(drop (table.grow (ref.null func) (i32.const 1)))",
+            "(table.fill (i32.const 0) (ref.null func) (i32.const 1))",
+            "(drop (ref.func $target))",
+            "(drop (ref.is_null (ref.null func)))",
+        ] {
+            // The `elem declare` is what makes `ref.func` legal at all: the specification wants
+            // a function to be named in an element segment before code may take a reference to
+            // it. Without it that one case is refused as invalid, which would have proved
+            // nothing about this pass.
+            let source = format!(
+                r#"(module
+                     (memory (export "memory") 1 1)
+                     (table 4 4 funcref)
+                     (func $target)
+                     (elem declare func $target)
+                     (func (export "cairn_run") {body}))"#
+            );
+            let err = check(&source).unwrap_err();
+            assert!(
+                matches!(
+                    err,
+                    Rejection::ReferenceInstruction { .. } | Rejection::ReferenceValue { .. }
+                ),
+                "got {err:?} for {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_a_second_table() {
+        // Multiple tables arrive with the proposal. A second one would be indexed correctly by
+        // every engine except Cairn's, whose `call_indirect` resolves against a single table and
+        // ignores the instruction's table index — a consensus divergence, not a missing feature.
+        //
+        // `NonFunctionTable` has no test beside this one because it cannot currently be reached:
+        // the only non-function element type is `externref`, and this `wasmparser` puts that
+        // behind the GC feature. It is kept for the reason `Rejection` states — the structural
+        // pass has to stay correct if the allowlist widens again, and a rule that quietly leaned
+        // on the feature gate would fail open at exactly that moment.
         let err = check(
             r#"(module
                  (memory (export "memory") 1 1)
-                 (func (export "cairn_run") (param externref)))"#,
+                 (table 1 1 funcref)
+                 (table 1 1 funcref)
+                 (func (export "cairn_run")))"#,
         )
         .unwrap_err();
-        assert!(matches!(err, Rejection::Invalid { .. }), "got {err:?}");
+        assert!(matches!(err, Rejection::MultipleTables), "got {err:?}");
     }
 
     #[test]

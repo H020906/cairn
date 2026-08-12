@@ -28,6 +28,7 @@ done this way?"*
 | [0015](0015-canaries-are-what-catch-a-cheat.md) | Canaries are what catch a cheat, and they are grounded in replication | Accepted, completes 0001 |
 | [0016](0016-math-belongs-in-the-module-not-the-host.md) | Math belongs in the module, not the host | Accepted, extends 0003 |
 | [0017](0017-a-verdict-nobody-can-read-is-not-a-verdict.md) | Give the re-execution route a typed verdict | Accepted, closes an open item in 0015 |
+| [0018](0018-a-compilers-call-indirect-is-not-the-specifications.md) | Admit reference types for their encoding, refuse them as values | Accepted, narrows 0003 |
 
 ## Reading order
 
@@ -122,6 +123,20 @@ bisection is a wrong answer plus a party corrupting its own replay to defend it.
 the re-execution route are the ones that cannot argue, which is to say browsers, which is to say
 the volunteers this project is for — so charging them as liars would have been the failure every
 other decision here is arranged to avoid.
+
+And **0018**, which is what happened when somebody finally compiled a Rust program containing a
+trait object and handed it to Cairn. It was refused. Not for anything it did — `rustc` writes
+`call_indirect`'s table index as a padded five-byte LEB128 where the base specification wants one
+zero byte, so the gate answered `zero byte expected` to a module with one table, table index zero,
+and no reference anywhere near a value. **The refusal was about how a zero is spelled**, and it
+excluded most non-trivial compiler output. It went unnoticed because the only compiled workload in
+the repository was a math library, and statically resolved arithmetic never touches a table.
+
+Read it for the shape of the fix, which is the part worth copying: the proposal is admitted for its
+encoding, and the four things it would otherwise let through are refused structurally, each naming
+the property it protects. And for the correction it makes to its own phase — the plan assumed
+widening the gate meant implementing instructions, and the first thing it found was a legal
+spelling of a number the interpreter already handled.
 
 ## Format
 

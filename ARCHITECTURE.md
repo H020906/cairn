@@ -197,6 +197,12 @@ closes each one:
 | Host clock, entropy, filesystem, network | Not reachable — the host interface exposes none of them |
 | Memory-growth failure depends on host RAM | Fixed memory ceiling per unit, declared in the manifest; OOM is deterministic |
 | Divergent instruction counting | Explicit fuel metering, baked into the module rather than counted by the engine. Only the dispute path runs it, since only that path commits to a trace (ADR-0005) |
+| A reference on the operand stack has no host-independent hash | Refused structurally — as a parameter, result, local or global, and every `ref.*` and `table.*` instruction with it. **The reference-types *proposal* is admitted anyway**, because compilers encode `call_indirect`'s table index in a form only that proposal permits (ADR-0018) |
+
+**A refusal has to happen at the gate, not in the interpreter.** `Trap::Unsupported` is Cairn's
+own invariant failure and no other engine raises it, so a module that Cairn traps on and wasmtime
+completes is a disagreement in which the honest volunteer loses. That is not hypothetical: `br 0`
+at function scope did exactly this (`3b2ebcb`) until a generated module caught it.
 
 **The top technical risk in this project** is that the fast path (the browser's native WASM
 engine) and the slow path (our instrumented interpreter) disagree on some edge case. If

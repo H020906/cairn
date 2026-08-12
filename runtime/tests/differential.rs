@@ -1430,8 +1430,9 @@ fn a_deliberate_divergence_is_caught() {
 ///
 /// Two `rustc` invocations rather than a nested cargo: `cairn-math` has no dependencies, so
 /// there is nothing to resolve, and a cargo inside a cargo contends for the same build lock.
-fn math_probe_module() -> Option<Vec<u8>> {
-    let rustc = std::env::var("RUSTC")
+/// Where `rustc` is, given that a test does not inherit a build script's environment.
+fn rustc_path() -> std::path::PathBuf {
+    std::env::var("RUSTC")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
             let beside = std::env::var("CARGO").ok().map(|cargo| {
@@ -1444,19 +1445,17 @@ fn math_probe_module() -> Option<Vec<u8>> {
             beside
                 .filter(|path| path.exists())
                 .unwrap_or_else(|| "rustc".into())
-        });
+        })
+}
 
-    let workloads = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/rust");
-    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("math-probe");
-    std::fs::create_dir_all(&out).expect("should be able to write under the target dir");
-    let rlib = out.join("libcairn_math.rlib");
-
-    // The same flags `docs/WORKLOADS.md` tells a workload author to pass, for the same reasons:
-    // the memory maximum is required for admission and no toolchain emits one, and the shadow
-    // stack has to be shrunk first or the link fails with a message that never mentions stacks.
-    // The optimisation flags are worth a hundredfold in module size — see
-    // `cairn-math/tests/wasm.rs`.
-    let common = [
+/// The flags `docs/WORKLOADS.md` tells a workload author to pass, for the reasons it gives.
+///
+/// The memory maximum is required for admission and no toolchain emits one, and the shadow stack
+/// has to be shrunk in the same breath or the link fails with a message that never mentions
+/// stacks. The optimisation flags are worth a hundredfold in module size — see
+/// `cairn-math/tests/wasm.rs`.
+const fn wasm_flags() -> [&'static str; 20] {
+    [
         "--edition",
         "2021",
         "--target",
@@ -1477,7 +1476,49 @@ fn math_probe_module() -> Option<Vec<u8>> {
         "link-arg=--initial-memory=262144",
         "-C",
         "link-arg=--max-memory=262144",
-    ];
+    ]
+}
+
+/// Build one dependency-free `.rs` file into a workload module.
+///
+/// `None` means the WebAssembly target is not installed, which is a skip rather than a failure —
+/// and only that reason, because a test that skips for an unexpected reason is worse than one
+/// that fails.
+fn build_probe(source: &str, crate_name: &str) -> Option<Vec<u8>> {
+    let workloads = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/rust");
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join(crate_name);
+    std::fs::create_dir_all(&out).expect("should be able to write under the target dir");
+    let wasm = out.join(format!("{crate_name}.wasm"));
+
+    let built = std::process::Command::new(rustc_path())
+        .args(wasm_flags())
+        .args(["--crate-type", "cdylib", "--crate-name", crate_name])
+        .arg("-o")
+        .arg(&wasm)
+        .arg(workloads.join(source))
+        .output()
+        .ok()?;
+    if !built.status.success() {
+        let complaint = String::from_utf8_lossy(&built.stderr);
+        assert!(
+            complaint.contains("wasm32-unknown-unknown"),
+            "building {source} for WebAssembly failed for a reason other than a missing \
+             target:\n{complaint}"
+        );
+        return None;
+    }
+    Some(std::fs::read(&wasm).expect("the probe module was not written"))
+}
+
+fn math_probe_module() -> Option<Vec<u8>> {
+    let rustc = rustc_path();
+
+    let workloads = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/rust");
+    let out = std::path::Path::new(env!("CARGO_TARGET_TMPDIR")).join("math-probe");
+    std::fs::create_dir_all(&out).expect("should be able to write under the target dir");
+    let rlib = out.join("libcairn_math.rlib");
+
+    let common = wasm_flags();
 
     let built = std::process::Command::new(&rustc)
         .args(common)
@@ -1600,7 +1641,13 @@ fn math_arguments() -> Vec<Vec<u8>> {
 /// So the math is compiled into the module, out of nothing but the arithmetic WebAssembly
 /// specifies exactly. This test is the evidence that it worked. It is the only case in this
 /// file compiled from Rust by a real toolchain rather than written in the text format, which
-/// also makes it the only one that checks Cairn admits what a stock toolchain emits.
+/// was for a while the only one that checked Cairn admits what a stock toolchain emits.
+///
+/// **That claim was too strong and ADR-0018 is what it cost.** `cairn-math` is statically
+/// resolved arithmetic from end to end, so it contains no indirect call and never touches a
+/// function table — and the encoding Cairn was refusing lives in `call_indirect`. This test
+/// passed throughout, while every workload with a trait object in it was rejected at the gate.
+/// [`the_shapes_a_compiler_turns_into_indirect_calls_agree_on_every_engine`] is the other half.
 #[test]
 fn the_math_library_computes_the_same_bits_on_every_engine() {
     let Some(source) = math_probe_module() else {
@@ -1658,6 +1705,159 @@ fn the_math_library_computes_the_same_bits_on_every_engine() {
     }
     assert!(checked > 50, "only {checked} math batches were compared");
     println!("{checked} batches of eight arguments agreed across three engines");
+}
+
+/// A compiler's indirect calls go through the gate and every engine, and this is why.
+///
+/// # The measurement this test exists to hold in place
+///
+/// Cairn refused this workload until [ADR-0018], and not for anything the workload does. `rustc`
+/// writes `call_indirect`'s table index as a **padded five-byte LEB128**, `80 80 80 80 00`, where
+/// the base specification wants a single zero byte — a spelling the reference-types proposal
+/// permits and the base specification does not. So the admission gate answered
+/// `zero byte expected` for a module with one table, table index zero, and no reference anywhere
+/// near a value.
+///
+/// **That excluded most non-trivial compiler output**: a trait object, a function pointer, or any
+/// `dyn` dispatch at all is enough to produce one. It went unnoticed because `math-probe`, the
+/// only compiled workload in the repository, contains no indirect call — its functions are all
+/// statically resolved arithmetic, which is exactly the shape that does not exercise a table.
+///
+/// So the check is not "does the gate accept reference types". It is: **take a real toolchain's
+/// output for the constructs a compiler cannot avoid lowering through a table, and require every
+/// engine to agree on it.**
+///
+/// [ADR-0018]: ../../docs/adr/0018-a-compilers-call-indirect-is-not-the-specifications.md
+#[test]
+fn the_shapes_a_compiler_turns_into_indirect_calls_agree_on_every_engine() {
+    let Some(source) = build_probe("dispatch-probe/probe.rs", "dispatch_probe") else {
+        assert!(
+            !std::env::var("CAIRN_REQUIRE_WASM").is_ok_and(|required| required == "1"),
+            "CAIRN_REQUIRE_WASM=1 but wasm32-unknown-unknown is not installed"
+        );
+        println!(
+            "SKIPPED: wasm32-unknown-unknown is not installed, so a real toolchain's \
+             `call_indirect` was NOT checked. Install it with `rustup target add \
+             wasm32-unknown-unknown`, or set CAIRN_REQUIRE_WASM=1 to make this a failure."
+        );
+        return;
+    };
+
+    // First the claim about the gate, stated against the submitted bytes rather than the
+    // canonical ones. `canonical_bytes` would refuse them too, but through a panic that says
+    // nothing about which rule refused what.
+    validate::validate_submitted(&source, validate::Limits::default()).unwrap_or_else(|refusal| {
+        panic!(
+            "a stock `rustc` produced a workload Cairn will not admit: {refusal}\n\
+             This is the failure ADR-0018 is about. Do not widen the gate to make it pass \
+             without checking what the toolchain started emitting and whether the interpreter \
+             implements it."
+        )
+    });
+
+    // And that the padded spelling is really in there. Without this the test would keep passing
+    // if a future toolchain switched to the single-byte form — still useful, but no longer
+    // evidence about the thing ADR-0018 is about, and silently so.
+    //
+    // `0x11`, then the type index as a LEB128, then the table index as a LEB128. The table index
+    // is the one the base specification insists is a lone `0x00`; a length above one byte is the
+    // spelling that was being refused. Scanning for the bytes rather than decoding the section
+    // properly is enough here: a false positive would have to be a `0x11` inside a constant
+    // followed by two well-formed LEBs, and the count below is what would catch that.
+    let leb_len = |at: usize| -> Option<usize> {
+        let mut n = 0;
+        while let Some(byte) = source.get(at + n) {
+            n += 1;
+            if byte & 0x80 == 0 {
+                return Some(n);
+            }
+            if n > 5 {
+                return None;
+            }
+        }
+        None
+    };
+    let mut indirect = 0u32;
+    let mut padded = 0u32;
+    for at in 0..source.len() {
+        if source.get(at) != Some(&0x11) {
+            continue;
+        }
+        let Some(type_len) = leb_len(at + 1) else {
+            continue;
+        };
+        let Some(table_len) = leb_len(at + 1 + type_len) else {
+            continue;
+        };
+        indirect += 1;
+        if table_len > 1 {
+            padded += 1;
+        }
+    }
+    assert!(
+        indirect > 0,
+        "the probe compiled without a single `call_indirect`, so it is testing nothing — the \
+         optimiser devirtualised the trait objects and function pointers this file is made of"
+    );
+    assert!(
+        padded > 0,
+        "no `call_indirect` carries a multi-byte table index, so this toolchain no longer emits \
+         the encoding ADR-0018 is about. That is not a failure of Cairn — but this test is no \
+         longer evidence for the decision, and the ADR should say so."
+    );
+    println!(
+        "{padded} of {indirect} call_indirect immediates use the padded encoding the base \
+         specification forbids"
+    );
+
+    let mut checked = 0u32;
+    for (which, config) in [
+        ("dispute", Config::default()),
+        ("honest", HONEST_CONFIGS[0]),
+    ] {
+        let module = canonical_bytes(&source, config);
+        for input in [
+            &b""[..],
+            &b"a"[..],
+            &b"alpha"[..],
+            &b"the quick brown fox jumps over the lazy dog"[..],
+            &[0u8; 200][..],
+            &[0xffu8; 255][..],
+        ] {
+            let name = format!("dispatch {which} on {} bytes", input.len());
+            let mine = run_cairn(&module, input);
+            if mine.hit_a_cairn_limit {
+                continue;
+            }
+            assert!(
+                mine.output.is_some(),
+                "{name}: the probe trapped, which it has no business doing"
+            );
+
+            let interpreted = run_wasmi(&module, input);
+            assert_eq!(
+                mine.fuel, interpreted.fuel,
+                "{name}: fuel differs against wasmi"
+            );
+            assert_eq!(
+                mine.output, interpreted.output,
+                "{name}: output differs against wasmi"
+            );
+
+            let compiled = run_wasmtime(&module, input);
+            assert_eq!(
+                mine.fuel, compiled.fuel,
+                "{name}: fuel differs against wasmtime"
+            );
+            assert_eq!(
+                mine.output, compiled.output,
+                "{name}: output differs against wasmtime"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 12, "only {checked} dispatch cases were compared");
+    println!("{checked} indirect-dispatch cases agreed across three engines");
 }
 
 // --- the fourth engine: the one volunteers actually use ---------------------------------------

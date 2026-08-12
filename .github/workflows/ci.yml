@@ -118,6 +118,20 @@ jobs:
           cargo test -p cairn-math --release -- --nocapture
           cargo test -p cairn-runtime --release --test differential the_math_library -- --nocapture
 
+      - name: A compiler's indirect calls are admitted and agree everywhere
+        # The regression guard for ADR-0018. `rustc` spells `call_indirect`'s table index as a
+        # padded five-byte LEB128 where the base specification wants one zero byte, so until that
+        # ADR every workload containing a trait object or a function pointer was refused at the
+        # gate — for the spelling of a zero, by an interpreter that implemented the instruction.
+        #
+        # The step above did not catch it and could not: `cairn-math` is statically resolved
+        # arithmetic and contains no indirect call at all. This one compiles a workload made of
+        # nothing but trait objects and function pointers, and fails loudly if a toolchain
+        # release starts emitting something the gate refuses.
+        env:
+          CAIRN_REQUIRE_WASM: "1"
+        run: cargo test -p cairn-runtime --release --test differential the_shapes_a_compiler -- --nocapture
+
       - name: How long a cheat lasts, measured rather than assumed
         # ADR-0001 rests on a canary rate `c` and never said how fast sampling catches anybody.
         # This runs volunteers that cheat at known rates against the real Grid and prints the

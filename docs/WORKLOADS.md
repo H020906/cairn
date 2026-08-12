@@ -155,7 +155,7 @@ Each of these was considered and rejected on the merits:
 |---|---|
 | **threads, shared memory, atomics** | A unit is single-threaded by definition. Two threads interleave differently on different machines, and there is no trace that could describe "what the other thread did". |
 | **SIMD** | Several operations have corner cases the specification leaves to the implementation, which is exactly the class of thing that convicts honest volunteers. |
-| **reference types, GC, exceptions, tail calls** | State Cairn's commitment does not cover. A state root hashes the operand stack, locals, memory, globals and the frame chain; a reference is not any of those, so two workers could differ in a way the protocol cannot see. |
+| **reference *values*, GC, exceptions, tail calls** | State Cairn's commitment does not cover. A state root hashes the operand stack, locals, memory, globals and the frame chain; a reference is not any of those, so two workers could differ in a way the protocol cannot see. **This is about a reference in a value position** — see the note below, because indirect calls themselves are fine. |
 | **`memory64`, custom page sizes, multiple memories** | The memory commitment is a page tree of a fixed shape. |
 | **imported memory or tables** | State that arrives from outside the module is state the unit's identity does not cover. |
 | **a `start` section** | All execution must happen under `cairn_run`, or a unit could compute before anyone was watching. |
@@ -164,6 +164,31 @@ Each of these was considered and rejected on the merits:
 If you need one of these, the answer is not "ask for an exception" — it is that the
 verification mechanism cannot see it, and admitting it would make honest workers convictable.
 [ADR-0003](adr/0003-determinism-constraints.md) has the argument in full.
+
+### Indirect calls are fine, and that is worth saying because it was once not true
+
+**Trait objects, function pointers, `dyn` dispatch and vtables all work.** They compile to
+`call_indirect` through a function table, which Cairn implements completely, signature check
+included, and `workloads/rust/dispatch-probe` exists to keep it that way — it is made of nothing
+but those constructs and every engine has to agree on it.
+
+Until [ADR-0018](adr/0018-a-compilers-call-indirect-is-not-the-specifications.md) they did not
+work, and the reason is worth knowing if you ever see it again. `rustc` writes `call_indirect`'s
+table index as a padded five-byte LEB128 where the base specification wants a single zero byte, so
+the gate refused the module with:
+
+```
+not a valid Cairn module: zero byte expected (at offset 0x116)
+```
+
+That message names a byte offset and no cause, and the cause was the spelling of a zero. If a
+refusal ever reads like that again — a valid-looking module rejected at a byte offset inside a
+function body — suspect an encoding the gate does not admit rather than anything your program does.
+
+What is still refused is a reference reaching a **value**: a `funcref` parameter, result, local or
+global, and every `table.get`/`table.set`/`ref.func`. The table your indirect calls go through is
+fixed once the module is instantiated, and Cairn depends on that — it is why the state commitment
+does not need to cover the table.
 
 ### Floating point is admitted, and it is the sharp edge
 
