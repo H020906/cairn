@@ -1,0 +1,36 @@
+# The three link flags a Cairn workload needs, in the one place they can be set once and then
+# forgotten. **Do not delete this file.** Each line below was measured, not guessed:
+#
+#   just `--crate-type cdylib`        Cairn refuses it: "memory must declare a maximum"
+#   + --max-memory=131072             rust-lld: "maximum memory too small, 1114112 bytes needed"
+#   + --initial-memory=131072         rust-lld: "initial memory too small, 1048584 bytes needed"
+#   + -zstack-size=65536              it works
+#
+# The 1,114,112 and 1,048,584 in those messages are Rust's **1 MiB default shadow stack**, which
+# `wasm-ld` lays out first — and neither message mentions a stack. Read literally, they tell you
+# to raise the memory ceiling, and an author who does that ships a workload reserving a megabyte
+# it never touches, which every volunteer then holds while running it.
+#
+# `--max-memory` is the one Cairn insists on, and no toolchain emits it unless told to. Memory
+# growth that succeeds on one machine and fails on another is a disagreement, and a disagreement
+# convicts somebody.
+#
+# ## Changing the numbers
+#
+# Two 64 KiB pages: one for the stack, one for everything else. If your workload needs more,
+# **raise `--initial-memory` and `--max-memory` together** and leave the stack alone unless you
+# have deep recursion — a Cairn unit is usually straight-line numerical work, and the interpreter
+# bounds call depth explicitly, so recursion fails identically everywhere rather than wherever the
+# host's native stack happened to run out.
+#
+# The buffer sizes in `cairn_workload::workload!` are stack locals and live inside `stack-size`.
+
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=-zstack-size=65536",
+  "-C", "link-arg=--initial-memory=131072",
+  "-C", "link-arg=--max-memory=131072",
+]

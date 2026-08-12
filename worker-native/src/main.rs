@@ -50,6 +50,7 @@ const USAGE: &str = "\
 cairn-worker — run a Cairn work unit, or settle a disagreement about one
 
 USAGE
+    cairn-worker check     <module>
     cairn-worker run       <module> [input-file]
     cairn-worker trace     <module> [input-file]
     cairn-worker dispute   <module> <assigned-input> <claimed-input>
@@ -61,6 +62,10 @@ USAGE
     An omitted input file means an empty input.
 
 WHAT EACH ONE DOES
+    check     Asks whether Cairn would take this module, and says why not. Writes nothing
+              and executes nothing. Run it before you submit a workload; the refusals it
+              reports are the ones a coordinator would give you, with the fix attached.
+
     run       Executes the unit on wasmtime under honest-path instrumentation and prints
               the result. This is what a volunteer does, and it is the only command whose
               cost matters.
@@ -132,6 +137,7 @@ fn main() -> ExitCode {
         ["trace", module] => trace(module, None),
         ["trace", module, input] => trace(module, Some(input)),
         ["dispute", module, first, second] => settle(module, first, second),
+        ["check", module] => check(module),
         ["prepare", module, out] => publish(module, out, false),
         ["prepare", module, out, "--count-fuel"] => publish(module, out, true),
         ["volunteer", base, rest @ ..] => enlist(base, rest),
@@ -230,6 +236,170 @@ fn read_input(path: Option<&str>) -> Result<Vec<u8>, String> {
 /// to would put a Rust toolchain between a volunteer and contributing.
 ///
 /// [ADR-0005]: ../../docs/adr/0005-the-fast-path-cannot-snapshot.md
+/// Say whether Cairn would take this module, and if not, what to do about it.
+///
+/// # Why this is its own command rather than a flag on `prepare`
+///
+/// `prepare` needs somewhere to write, and needing an output path to ask a yes-or-no question is
+/// the kind of friction that stops people asking. A workload author's first question is *"will
+/// this be accepted"*, and it should cost one argument and change nothing on disk.
+///
+/// # Why the refusals carry hints
+///
+/// Because the refusal alone is frequently not enough to act on, and the measurement that proves
+/// it is in `workloads/template/.cargo/config.toml`: an author who has just been told *"memory
+/// must declare a maximum"* adds `--max-memory` and is then told *"maximum memory too small,
+/// 1114112 bytes needed"* by the linker — a message about a 1 MiB shadow stack that never says
+/// the word stack. The fix is a third flag neither message names. A gate that knows the answer
+/// and does not say it is choosing to be unhelpful.
+fn check(module: &str) -> Result<(), String> {
+    let bytes =
+        std::fs::read(module).map_err(|e| format!("could not read module {module}: {e}"))?;
+    let source = if Path::new(module)
+        .extension()
+        .is_some_and(|ext| ext == "wat")
+    {
+        wat::parse_bytes(&bytes)
+            .map_err(|e| format!("could not assemble {module}: {e}"))?
+            .into_owned()
+    } else {
+        bytes
+    };
+
+    if canon::is_canonical(&source) {
+        println!("verdict       already canonical — this module has been through the gate");
+        println!("bytes         {}", source.len());
+        println!();
+        println!("This is what a volunteer is sent, not what an author submits. Checking it says");
+        println!("nothing about the module you wrote; check that one instead.");
+        return Ok(());
+    }
+
+    let facts = match validate::validate_submitted(&source, validate::Limits::default()) {
+        Ok(facts) => facts,
+        Err(refusal) => {
+            println!("verdict       REFUSED");
+            println!("why           {refusal}");
+            if let Some(hint) = hint_for(&refusal) {
+                println!();
+                println!("{hint}");
+            }
+            return Err("this module would not be admitted".to_owned());
+        }
+    };
+
+    let canonical = canon::instrument(&source, Config::honest_path())
+        .map_err(|e| format!("admitted, but could not be instrumented: {e}"))?;
+
+    println!("verdict       admissible");
+    println!(
+        "bytes         {} submitted, {} canonical",
+        source.len(),
+        canonical.len()
+    );
+    println!(
+        "memory        {} .. {} pages of 64 KiB",
+        facts.memory_pages_min, facts.memory_pages_max
+    );
+    println!(
+        "reads input   {}",
+        if facts.imports_input { "yes" } else { "no" }
+    );
+    println!(
+        "writes output {}",
+        if facts.imports_output {
+            "yes".to_owned()
+        } else {
+            "NO — this unit can never answer anything".to_owned()
+        }
+    );
+    println!("unit id       {}", blake3::hash(&canonical));
+
+    if !facts.imports_output {
+        println!();
+        println!("A module that never calls `cairn.output` is admissible and useless: it will be");
+        println!("run, it will finish, and its result will be empty. That is reported rather than");
+        println!("refused, because an empty answer is a legitimate answer for some workloads.");
+    }
+    Ok(())
+}
+
+/// What to do about a refusal, where knowing the rule is not the same as knowing the fix.
+///
+/// `None` where the refusal already says everything useful. A hint that repeats the error in
+/// other words is worse than no hint, because it trains people to stop reading them.
+fn hint_for(refusal: &validate::Rejection) -> Option<String> {
+    use validate::Rejection as R;
+    let advice = match refusal {
+        R::UnboundedMemory => {
+            "No toolchain emits a memory maximum unless told to, and adding the obvious flag is \
+             not enough. All three of these are needed together:\n\n  \
+             -C link-arg=-zstack-size=65536\n  \
+             -C link-arg=--initial-memory=131072\n  \
+             -C link-arg=--max-memory=131072\n\n\
+             With only `--max-memory` the linker answers `maximum memory too small, 1114112 bytes \
+             needed`, and with `--initial-memory` too it answers `initial memory too small`. \
+             Neither message mentions a stack, and a stack is what they are about: Rust's wasm32 \
+             target reserves 1 MiB for a shadow stack and lays it out first. `-zstack-size` is \
+             what shrinks it.\n\n\
+             `workloads/template/.cargo/config.toml` sets all three in a place you set once."
+        }
+        R::ForeignImport { module, .. } if module.starts_with("wasi") => {
+            "That import comes from WASI, so this was built for `wasm32-wasip1` or similar. Build \
+             for `wasm32-unknown-unknown`: a Cairn unit has no operating system under it, and the \
+             only importable module is `cairn`."
+        }
+        R::ForeignImport { .. } => {
+            "The only importable module is `cairn`. Something in this workload — often a standard \
+             library facility that needs a host, such as a clock or a random number — is reaching \
+             outside the sandbox. There is no clock, no entropy, no filesystem and no network, and \
+             they are absent rather than restricted."
+        }
+        R::MissingExport { name } if name == "cairn_run" => {
+            "The entry point must be exported under exactly `cairn_run`. In Rust that is \
+             `#[no_mangle] pub extern \"C\" fn cairn_run()`, and the crate must be \
+             `crate-type = [\"cdylib\"]` — a `bin` produces a module expecting `_start`, which a \
+             Cairn unit does not have."
+        }
+        R::MissingExport { name } if name == "memory" => {
+            "The linear memory must be exported as `memory`. `wasm-ld` does that for a `cdylib` \
+             already, so this usually means `--no-export-memory` is somewhere in your flags, or \
+             the crate type is not `cdylib`."
+        }
+        R::StartSection => {
+            "A start section runs code before `cairn_run`, which would execute unmetered. This \
+             usually means the crate type is `bin` rather than `cdylib`, or something is \
+             registering a constructor."
+        }
+        R::Invalid { detail } if detail.contains("SIMD") || detail.contains("simd") => {
+            "This module uses SIMD, which is almost always the optimiser vectorising a loop rather \
+             than anything you wrote. `opt-level = \"s\"` in `[profile.release]` stops it; the \
+             template sets that."
+        }
+        R::Invalid { detail } if detail.contains("zero byte expected") => {
+            "That offset is inside a function body and this is very likely a `call_indirect` \
+             encoding — which Cairn now admits, so a toolchain new enough to emit something else \
+             may have arrived. See docs/adr/0018."
+        }
+        R::ReferenceValue { .. } | R::ReferenceInstruction { .. } => {
+            "Indirect calls are fine — trait objects, function pointers and `dyn` dispatch all \
+             work. What is refused is a function *reference* used as a value: passing one as an \
+             argument, storing one in a global, or `table.get`. A reference has no \
+             host-independent representation, so no execution trace can commit to one."
+        }
+        R::MemoryTooLarge { limit, .. } => {
+            return Some(format!(
+                "Lower `--max-memory`. The ceiling is {limit} pages of 64 KiB, and it is a real \
+                 constraint rather than a formality: a volunteer decides how many units it can \
+                 run at once by adding up declared maxima, so a workload that asks for more than \
+                 it needs is asking every volunteer to run fewer units."
+            ))
+        }
+        _ => return None,
+    };
+    Some(advice.to_owned())
+}
+
 fn publish(module: &str, out: &str, count_fuel: bool) -> Result<(), String> {
     let config = Config {
         meter: if count_fuel {

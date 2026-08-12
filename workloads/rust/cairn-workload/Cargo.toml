@@ -1,0 +1,25 @@
+# Deliberately outside the repository's workspace, for the reason `workloads/examples/rust` gives
+# in its own manifest: a workload is a program somebody *submits* to Cairn, not a part of it.
+#
+# This crate goes further than that example does, and could not be a workspace member even if the
+# rule were relaxed: it is `no_std` and it declares functions imported from the `cairn` host
+# module, so there is no host target it can be linked for. `cargo test --workspace` would fail on
+# it rather than skip it. Its test is `runtime/tests/toolchain.rs`, which builds the template that
+# depends on it and puts the result through the admission gate.
+#
+# `cairn-math` **is** a workspace member, and the difference is worth understanding: that crate is
+# ordinary Rust that computes with `f64` and can be tested against the platform on the host. This
+# one is a binding to an interface that only exists inside a Cairn unit.
+[workspace]
+
+[package]
+name = "cairn-workload"
+description = "Write a Cairn work unit without writing the parts that get it refused"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# No dependencies, and the rule is the project's: a dependency must do something the standard
+# library cannot. Everything here is an `extern` block and a `macro_rules!`.
+[dependencies]

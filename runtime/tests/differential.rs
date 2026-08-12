@@ -1860,6 +1860,148 @@ fn the_shapes_a_compiler_turns_into_indirect_calls_agree_on_every_engine() {
     println!("{checked} indirect-dispatch cases agreed across three engines");
 }
 
+/// Build `workloads/template` the way its README tells an author to.
+///
+/// **With `cargo`, not `rustc`, and that is the point of it.** The template's value is that
+/// somebody can copy the directory and type `cargo build --release`; the manifest, the profile
+/// and above all `.cargo/config.toml` are what make that work, and none of them is exercised by
+/// invoking `rustc` with the flags spelled out. This is the only test in the repository that
+/// checks the instructions rather than the code.
+///
+/// Nesting cargo inside cargo is safe here only because the template declares its own
+/// `[workspace]` and therefore builds into its own `target/`, so it takes a different build lock.
+/// `cairn-math/tests/wasm.rs` avoids nesting for exactly the reason that does not apply here.
+fn build_template() -> Option<Vec<u8>> {
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
+    let template = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/template");
+
+    let built = std::process::Command::new(cargo)
+        .arg("build")
+        .arg("--release")
+        .arg("--manifest-path")
+        .arg(template.join("Cargo.toml"))
+        // Cargo passes its own target directory down through the environment, and inheriting it
+        // would put the template's artefacts in the workspace's `target/` — taking the lock this
+        // test is running under, and deadlocking. The template's own directory is the default.
+        .env_remove("CARGO_TARGET_DIR")
+        .output()
+        .ok()?;
+    if !built.status.success() {
+        let complaint = String::from_utf8_lossy(&built.stderr);
+        assert!(
+            complaint.contains("wasm32-unknown-unknown"),
+            "the workload template does not build, which is the one thing it exists to do:\n\
+             {complaint}"
+        );
+        return None;
+    }
+
+    let wasm = template.join("target/wasm32-unknown-unknown/release/cairn_workload_template.wasm");
+    Some(std::fs::read(&wasm).expect("the template built but produced no module"))
+}
+
+/// Every `(module, name)` the given module imports.
+fn imports_of(module: &[u8]) -> Vec<String> {
+    let mut found = Vec::new();
+    for payload in wasmparser::Parser::new(0).parse_all(module) {
+        if let Ok(wasmparser::Payload::ImportSection(reader)) = payload {
+            // `into_imports` rather than `into_iter`, for the reason `validate.rs` gives: it
+            // flattens the compact-import encoding, so this stays correct if the allowlist grows.
+            for import in reader.into_imports().flatten() {
+                found.push(format!("{}.{}", import.module, import.name));
+            }
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The workload template compiles, is admitted, imports nothing, and agrees everywhere.
+///
+/// # Why this test is the acceptance criterion for the SDK
+///
+/// The roadmap's test for a workload SDK was *"somebody who is not me compiles a workload"*, and
+/// this is as close as an automated check gets: it runs the documented command against the
+/// documented directory and requires the result to be a module Cairn will actually take.
+///
+/// # The import assertion is doing more work than it looks like
+///
+/// `workloads/template` is a **`std`** crate, which reads as a mistake if you have absorbed the
+/// usual advice about `no_std` on a bare target. An earlier draft was `no_std`, and it could not
+/// depend on `cairn-math`: `f64::sqrt`, `floor`, `ceil`, `trunc` and `round_ties_even` are single
+/// WebAssembly instructions that Rust puts in `std` rather than `core`, so a `no_std` workload
+/// using that library fails with `found duplicate lang item panic_impl`.
+///
+/// **`no_std` was a proxy for "nothing comes from the host", and this is the property itself.**
+/// If `std` ever dragged an allocator hook, a clock or a libm call into the module, it would
+/// appear here as a third import. See ADR-0019.
+#[test]
+fn the_workload_template_compiles_and_is_admissible() {
+    let Some(source) = build_template() else {
+        assert!(
+            !std::env::var("CAIRN_REQUIRE_WASM").is_ok_and(|required| required == "1"),
+            "CAIRN_REQUIRE_WASM=1 but wasm32-unknown-unknown is not installed"
+        );
+        println!(
+            "SKIPPED: wasm32-unknown-unknown is not installed, so the workload template was NOT \
+             built. Install it with `rustup target add wasm32-unknown-unknown`, or set \
+             CAIRN_REQUIRE_WASM=1 to make this a failure."
+        );
+        return;
+    };
+
+    validate::validate_submitted(&source, validate::Limits::default()).unwrap_or_else(|refusal| {
+        panic!(
+            "the workload template produces a module Cairn will not admit: {refusal}\n\
+             Everything an author is told to do is in that directory, so this is a broken \
+             instruction rather than a broken workload."
+        )
+    });
+
+    assert_eq!(
+        imports_of(&source),
+        vec!["cairn.input".to_owned(), "cairn.output".to_owned()],
+        "the template imports something other than Cairn's two host functions"
+    );
+
+    let mut checked = 0u32;
+    for (which, config) in [
+        ("dispute", Config::default()),
+        ("honest", HONEST_CONFIGS[0]),
+    ] {
+        let module = canonical_bytes(&source, config);
+        for input in [&b""[..], &b"alpha"[..], &[0xffu8; 300][..]] {
+            let name = format!("template {which} on {} bytes", input.len());
+            let mine = run_cairn(&module, input);
+            if mine.hit_a_cairn_limit {
+                continue;
+            }
+            assert!(mine.output.is_some(), "{name}: the template trapped");
+
+            let interpreted = run_wasmi(&module, input);
+            assert_eq!(mine.fuel, interpreted.fuel, "{name}: fuel differs vs wasmi");
+            assert_eq!(
+                mine.output, interpreted.output,
+                "{name}: output differs vs wasmi"
+            );
+
+            let compiled = run_wasmtime(&module, input);
+            assert_eq!(mine.fuel, compiled.fuel, "{name}: fuel differs vs wasmtime");
+            assert_eq!(
+                mine.output, compiled.output,
+                "{name}: output differs vs wasmtime"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked >= 6, "only {checked} template cases were compared");
+    println!(
+        "the template is {} bytes, imports exactly its two host functions, and agreed on \
+         {checked} cases across three engines",
+        source.len()
+    );
+}
+
 // --- the fourth engine: the one volunteers actually use ---------------------------------------
 
 /// One case handed to the browser's engine, with what Cairn made of it kept on this side.

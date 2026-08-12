@@ -132,6 +132,19 @@ jobs:
           CAIRN_REQUIRE_WASM: "1"
         run: cargo test -p cairn-runtime --release --test differential the_shapes_a_compiler -- --nocapture
 
+      - name: The workload template compiles and is admissible
+        # The acceptance test for the SDK (ADR-0019), and the only test here that checks the
+        # *instructions* rather than the code: it runs the documented command against the
+        # documented directory and requires a module Cairn will take.
+        #
+        # It also asserts the import list is exactly `cairn.input` and `cairn.output`. The
+        # template is a `std` crate — `no_std` does not compose with `cairn-math`, whose `sqrt`
+        # and rounding functions are WebAssembly instructions that Rust keeps in `std` — so this
+        # is what stands behind "nothing comes from the host" instead of `no_std` doing it.
+        env:
+          CAIRN_REQUIRE_WASM: "1"
+        run: cargo test -p cairn-runtime --release --test differential the_workload_template -- --nocapture
+
       - name: How long a cheat lasts, measured rather than assumed
         # ADR-0001 rests on a canary rate `c` and never said how fast sampling catches anybody.
         # This runs volunteers that cheat at known rates against the real Grid and prints the

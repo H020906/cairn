@@ -4,13 +4,40 @@ A Cairn work unit is a WebAssembly module. This page is the whole contract, and 
 if you find yourself reading `runtime/src/validate.rs` to answer a question, that is a bug in
 this page and worth reporting.
 
-Check any module against the real gate before you believe anything here:
+## Start here
+
+Copy `workloads/template`, rename the package, and write your `run`:
 
 ```bash
-cargo run -p cairn-worker -- prepare your-workload.wat /tmp/unit.wasm
+cp -r workloads/template my-workload
+cargo build --release --manifest-path my-workload/Cargo.toml
 ```
 
-It validates, instruments, and prints the unit's identity — or refuses, with a reason.
+```rust
+cairn_workload::workload! {
+    input: 4096,
+    output: 64,
+    run: run,
+}
+
+fn run(input: &[u8], answer: &mut cairn_workload::Answer<'_>) {
+    let total: u64 = input.iter().map(|byte| u64::from(*byte)).sum();
+    answer.push(&total.to_le_bytes());
+}
+```
+
+Then ask Cairn whether it will take the result:
+
+```bash
+cargo run -p cairn-worker -- check my-workload/target/wasm32-unknown-unknown/release/my_workload.wasm
+```
+
+`check` writes nothing and executes nothing. It prints what the gate decided, and when the answer
+is no it prints the fix rather than only the rule.
+
+**The rest of this page is the contract underneath that template.** You do not need it to write a
+workload; you need it when something is refused, or when you are writing a unit in a language the
+template does not cover.
 
 ---
 
@@ -97,10 +124,16 @@ cargo run -p cairn-worker -- run workloads/examples/sum-of-squares.wat workloads
 ### From C or Rust
 
 Any toolchain that emits a `wasm32` module works, provided the output uses nothing outside the
-feature set below. There is a working Rust version of the unit above in
-[`workloads/examples/rust/`](../workloads/examples/rust) — **CI builds it and puts it through
-the admission gate on every push**, so if a compiler release starts emitting something Cairn
-refuses, that is a red build rather than a surprise for you.
+feature set below.
+
+**There are two Rust workloads in this repository and they are for different readers.**
+[`workloads/template/`](../workloads/template) is the one to copy — it uses the SDK and hides
+everything below. [`workloads/examples/rust/`](../workloads/examples/rust) is the same unit written
+out by hand: `no_std`, its own `extern` block, its own panic handler, its own `static mut` buffer.
+Read it when you want to see what the SDK is doing, or when you are porting this to a language
+that has no SDK. **CI builds both and puts both through the admission gate on every push**, so if
+a compiler release starts emitting something Cairn refuses, that is a red build rather than a
+surprise for you.
 
 ```bash
 cargo build --release --manifest-path workloads/examples/rust/Cargo.toml
@@ -112,21 +145,34 @@ cargo run -p cairn-worker -- run \
 It answers `bd3e5cfce4250000` — the same eight bytes the hand-written WAT produces, which is
 what "the unit is the module, not the source" means in practice.
 
-Three things trip people up, and the third is the one nobody guesses:
+**If you started from `workloads/template` you already have all of this** and can skip to the next
+section. What follows is for a toolchain the template does not cover, and it is written out
+because the errors involved name everything except the cause.
 
 - **No WASI.** `wasm32-wasi` emits imports from `wasi_snapshot_preview1`, and the only
   importable module is `cairn`. Target `wasm32-unknown-unknown`, and in C use `-nostdlib`.
-- **Declare the memory maximum.** No toolchain emits one by default. In Rust, pass
-  `-C link-arg=--max-memory=N`; in C, `-Wl,--max-memory=N`. Without it the module is refused.
-- **Shrink the shadow stack, or the link fails for a reason it does not name.** Rust's wasm32
-  target defaults to a **1 MiB** shadow stack laid out *first*, so any `--max-memory` below
-  about 1 MiB fails with `rust-lld: error: initial memory too small` — a message that never
-  mentions stacks. Pass `-C link-arg=-zstack-size=65536` alongside it. A Cairn unit is
-  straight-line numerical work, and the interpreter bounds call depth explicitly in any case,
-  which is what makes deep recursion fail identically everywhere rather than wherever the
-  host's native stack ran out.
+- **Three link flags, and they only work together.** This was measured rather than reasoned
+  about, one step at a time:
 
-The whole flag set is in [`workloads/examples/rust/.cargo/config.toml`](../workloads/examples/rust/.cargo/config.toml),
+  | What you would try | What you get |
+  |---|---|
+  | `--target wasm32-unknown-unknown --crate-type cdylib` | Cairn: `memory must declare a maximum` |
+  | add `-C link-arg=--max-memory=131072` | `rust-lld: maximum memory too small, 1114112 bytes needed` |
+  | add `-C link-arg=--initial-memory=131072` | `rust-lld: initial memory too small, 1048584 bytes needed` |
+  | add `-C link-arg=-zstack-size=65536` | it works |
+
+  The 1,114,112 and 1,048,584 are Rust's **1 MiB default shadow stack**, which `wasm-ld` lays out
+  first — and **neither message mentions a stack.** Read literally they tell you to raise the
+  ceiling, and an author who does ships a workload reserving a megabyte it never touches, which
+  every volunteer then holds while running it. `-zstack-size` is the flag that is actually being
+  asked for. In C the same three are `-Wl,--max-memory=N`, `-Wl,--initial-memory=N`,
+  `-Wl,-zstack-size=N`.
+
+  A Cairn unit is usually straight-line numerical work, and the interpreter bounds call depth
+  explicitly in any case — which is what makes deep recursion fail identically everywhere rather
+  than wherever the host's native stack ran out.
+
+The whole flag set is in [`workloads/template/.cargo/config.toml`](../workloads/template/.cargo/config.toml),
 which is three lines and is the thing to copy.
 
 The instrumentation pass drops custom sections, so the name section goes with them and stack

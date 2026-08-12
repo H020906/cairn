@@ -29,6 +29,7 @@ done this way?"*
 | [0016](0016-math-belongs-in-the-module-not-the-host.md) | Math belongs in the module, not the host | Accepted, extends 0003 |
 | [0017](0017-a-verdict-nobody-can-read-is-not-a-verdict.md) | Give the re-execution route a typed verdict | Accepted, closes an open item in 0015 |
 | [0018](0018-a-compilers-call-indirect-is-not-the-specifications.md) | Admit reference types for their encoding, refuse them as values | Accepted, narrows 0003 |
+| [0019](0019-no-std-is-a-proxy-and-the-import-list-is-the-property.md) | A workload SDK, and `no_std` is the wrong guarantee to reach for | Accepted, builds on 0016 |
 
 ## Reading order
 
@@ -137,6 +138,20 @@ encoding, and the four things it would otherwise let through are refused structu
 the property it protects. And for the correction it makes to its own phase — the plan assumed
 widening the gate meant implementing instructions, and the first thing it found was a legal
 spelling of a number the interpreter already handled.
+
+**0019** is the workload SDK, and its finding is one word: **proxy.** The obvious shape for a
+workload is `no_std` — no operating system underneath, no way to reach for a clock or an
+allocator. It does not compose with this project's own math library, because `f64::sqrt`,
+`floor`, `ceil`, `trunc` and `round_ties_even` are single WebAssembly instructions that Rust puts
+in `std` rather than `core`. Chasing `no_std` would have meant replacing a specified,
+correctly-rounded instruction with a hand-written one, in the library whose entire purpose is to
+not do that.
+
+**`no_std` was standing in for "nothing comes from the host", and that property is directly
+checkable**: read the module's import section and require it to be exactly `cairn.input` and
+`cairn.output`. Read 0019 also for the thing the SDK is really for — every piece of ceremony it
+removes is a way to be refused by an error message that names something else, and the three link
+flags are measured there one step at a time.
 
 ## Format
 

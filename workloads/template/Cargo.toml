@@ -1,0 +1,42 @@
+# Copy this directory, rename the package, write your `run`. Nothing else here needs changing.
+#
+# `[workspace]` on its own line is not a mistake and not a leftover. It declares this package the
+# root of its own workspace, which stops cargo walking up the directory tree and adopting whatever
+# workspace it finds — the thing that would otherwise happen the moment you copy this into a
+# repository of your own, with an error about a package not being a member.
+[workspace]
+
+[package]
+name = "cairn-workload-template"
+description = "A Cairn work unit. Copy this directory and write your own `run`."
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+# `cdylib` is what produces a bare `.wasm` module. The alternative, `bin`, produces one expecting
+# a `_start`, and a Cairn unit has no start: everything runs under `cairn_run`, so that every
+# instruction is metered.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# The SDK. Everything it does is something that would otherwise be a way to be refused.
+cairn-workload = { path = "../rust/cairn-workload" }
+
+# Transcendental functions, if you need them. **Do not use `f64::sin` and friends** — they are not
+# in WebAssembly, so they come from whatever library the host was built with, and those libraries
+# disagree with each other on every function that has ever been measured. Cairn has no notion of
+# *nearly the same*: a disagreement is a dispute, and a dispute convicts somebody. See
+# `docs/adr/0016-math-belongs-in-the-module-not-the-host.md`.
+cairn-math = { path = "../rust/cairn-math" }
+
+[profile.release]
+# None of this is about speed, and the size difference is not cosmetic — a workload is downloaded
+# by every volunteer that runs it. `opt-level = "s"` also keeps the compiler from autovectorising,
+# which is the usual way a workload accidentally acquires SIMD and stops being admissible.
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -96,6 +96,24 @@
 //! own interpreter, wasmi, wasmtime, and the V8 in the volunteer's browser.
 
 #![forbid(unsafe_code)]
+// **This crate is not `no_std`, and it cannot be — which is worth writing down, because it looks
+// like it should be.** Every line of it is arithmetic over `f64` with no allocation and no host
+// underneath, so `#![no_std]` is the obvious shape. It fails on five methods:
+//
+//     f64::sqrt   f64::floor   f64::ceil   f64::trunc   f64::round_ties_even
+//
+// All five are **single WebAssembly instructions** — `f64.sqrt`, `f64.floor`, `f64.ceil`,
+// `f64.trunc`, `f64.nearest` — and all five live in `std` rather than `core`, because on an
+// ordinary target they are libm calls. On `wasm32-unknown-unknown` they compile to the
+// instruction and import nothing, which `tests/wasm.rs` checks by reading the module's import
+// section: it is exactly `cairn.input` and `cairn.output`.
+//
+// **So `no_std` would be a proxy for the property Cairn needs, and the property is directly
+// checkable.** What matters is that no math comes from the host, and the import list says whether
+// it does. Reaching for `no_std` here would mean writing a software `sqrt` in place of an
+// instruction the specification defines exactly — trading a checked property for an unchecked one
+// and a correctly-rounded result for a hand-rolled one. See ADR-0019.
+//
 // The polynomial coefficients below are written with more decimal digits than a `f64` holds.
 // That is deliberate and worth the lint: they are transcribed from fdlibm exactly as published,
 // so a reader can compare them character by character against the reference rather than

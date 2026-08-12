@@ -171,3 +171,40 @@ fn a_module_that_is_not_admissible_is_refused() {
         "expected a validation error, got: {stderr}"
     );
 }
+
+#[test]
+fn check_answers_the_question_a_workload_author_actually_asks() {
+    // `check` exists because the first question is "will this be accepted", and answering it
+    // should not require picking an output path. It writes nothing and executes nothing.
+    let unit = fixture("sum-of-squares.wat");
+    let report = worker(&["check", unit.to_str().expect("path should be UTF-8")]);
+    assert!(report.contains("admissible"), "got: {report}");
+    assert!(report.contains("unit id"), "got: {report}");
+    assert!(
+        report.contains("reads input   yes") && report.contains("writes output yes"),
+        "the report should say what the unit does with its host interface: {report}"
+    );
+
+    // And a refusal has to carry the fix, not only the rule. This is the measured case: an
+    // author told "declare a maximum" adds `--max-memory`, and the linker then complains about
+    // a shadow stack without using the word — so the hint names all three flags at once.
+    let bad = std::env::temp_dir().join("cairn-smoke-unbounded-memory.wat");
+    std::fs::write(
+        &bad,
+        "(module (memory (export \"memory\") 1) (func (export \"cairn_run\")))",
+    )
+    .expect("should write fixture");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cairn-worker"))
+        .args(["check", bad.to_str().expect("path should be UTF-8")])
+        .output()
+        .expect("the worker binary should run");
+
+    assert!(!output.status.success(), "an unbounded memory was accepted");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("REFUSED"), "got: {stdout}");
+    assert!(
+        stdout.contains("-zstack-size") && stdout.contains("--max-memory"),
+        "the hint must name the flag the error messages do not: {stdout}"
+    );
+}
