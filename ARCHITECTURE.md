@@ -334,9 +334,18 @@ off the WebSocket** — it is instrumentation, not decoration. A contributor sho
 to see what they are computing and why it matters.
 
 ### `workloads/`
-Real science, compiled to WASM. The first target is molecular docking for virtual drug
-screening: one compound per work unit, embarrassingly parallel, deterministic, and
-genuinely useful.
+Real science, compiled to WASM. **The first real workload is a Lomb–Scargle periodogram**
+(`workloads/periodogram`): finding periodic signals in unevenly-sampled astronomical time
+series, one frequency band per work unit. It is the shape of search Einstein@Home runs.
+
+This paragraph used to say molecular docking, and
+[ADR-0020](docs/adr/0020-the-first-real-workload-is-a-periodogram-not-docking.md) records why
+that changed. Docking remains an intention and needs two things Cairn does not have: **shared
+reference data per campaign** — a receptor is tens of thousands of atoms, identical for every
+unit, and Cairn's unit model carries its input in the unit — and an answer that can be checked
+against something other than itself, since scoring functions are empirical. The periodogram has
+neither problem: its observations fit in a unit, and a signal synthesised at a known frequency
+has to come back at that frequency.
 
 `workloads/rust/cairn-math` is the piece that had to exist first. WebAssembly has no `exp`,
 no `log` and no `sin`, and a workload may not import them from the host — V8 and the platform

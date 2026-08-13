@@ -145,6 +145,18 @@ jobs:
           CAIRN_REQUIRE_WASM: "1"
         run: cargo test -p cairn-runtime --release --test differential the_workload_template -- --nocapture
 
+      - name: A real scientific kernel recovers a known period
+        # The one test in the repository that checks the answer is RIGHT rather than only that
+        # every engine agrees about it — three engines computing the same wrong number agree
+        # perfectly. A signal is synthesised at a known frequency and the periodogram has to find
+        # it, within the resolution the observing span physically allows (ADR-0020).
+        #
+        # It is also the hardest exercise of the math library: a periodogram is `sin` and `cos`
+        # and almost nothing else, which is why it could not have been written before ADR-0016.
+        env:
+          CAIRN_REQUIRE_WASM: "1"
+        run: cargo test -p cairn-runtime --release --test differential a_periodogram -- --nocapture
+
       - name: How long a cheat lasts, measured rather than assumed
         # ADR-0001 rests on a canary rate `c` and never said how fast sampling catches anybody.
         # This runs volunteers that cheat at known rates against the real Grid and prints the

@@ -1,0 +1,22 @@
+# The same three flags the template carries, with the numbers raised — which is the thing the
+# template's comments tell you to do and this is what it looks like.
+#
+# This workload holds its observations in a 32 KiB stack buffer, so the 64 KiB shadow stack the
+# template ships with would leave almost nothing for frames. Stack and memory are raised
+# together: four 64 KiB pages, of which two are the stack.
+#
+# **`--initial-memory` and `--max-memory` stay equal.** A Cairn unit may not grow its memory
+# beyond the declared maximum — growth that succeeds on one machine and fails on another is a
+# disagreement — so there is nothing to be gained by starting smaller, and a volunteer budgets
+# for the maximum in any case (`worker-native/src/capacity.rs`). Asking for more than you need
+# means every volunteer runs fewer units at once.
+
+[build]
+target = "wasm32-unknown-unknown"
+
+[target.wasm32-unknown-unknown]
+rustflags = [
+  "-C", "link-arg=-zstack-size=131072",
+  "-C", "link-arg=--initial-memory=262144",
+  "-C", "link-arg=--max-memory=262144",
+]

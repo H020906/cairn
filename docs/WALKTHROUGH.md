@@ -391,6 +391,57 @@ small unit is not a measurement. **What this page demonstrates is agreement, not
 
 ---
 
+## 7 · Something that is actually science
+
+Everything above uses `sum-of-squares`, which is a fixture. This is not:
+
+```bash
+cargo build --release --manifest-path workloads/periodogram/Cargo.toml
+
+cargo run --release -p cairn-worker -- run \
+  workloads/periodogram/target/wasm32-unknown-unknown/release/cairn_periodogram.wasm \
+  workloads/periodogram/band-with-the-signal.bin
+```
+
+A **Lomb–Scargle periodogram**: given brightness measurements taken at uneven intervals — which is
+what a telescope produces, because of daylight and weather and scheduling — it finds how much
+periodic signal is in them at each frequency in a band. A peak is a candidate period: a variable
+star, a binary, a transiting planet, a pulsar. One frequency band is one work unit, which is the
+shape of search Einstein@Home runs.
+
+The answer is three `f64`s: the frequency with the most power, that power, and the total across the
+band. The two committed inputs are the **same observations over two different bands**, which is how
+a real search is divided among volunteers — so run the other one too:
+
+| unit | peak | power |
+|---|---:|---:|
+| `band-with-the-signal.bin` | **0.1370 c/d** | **58.1** |
+| `band-without-it.bin` | 0.5331 c/d | 1.8 |
+
+The signal was injected at 0.137 cycles per day and comes back at 0.137. The other band has no
+signal in it, so its "peak" is the largest fluctuation in noise — and **a power of 1.8 is what pure
+noise is supposed to give here**: this workload normalises by the variance, which makes the power
+at each independent frequency exponentially distributed with mean 1 under the null hypothesis. The
+non-detection is not padding for the demonstration; it is the calibration that makes 58.1 mean
+something.
+
+**Why this workload could not have been written six commits ago.** A periodogram is `sin` and `cos`
+and almost nothing else, and WebAssembly has neither. Taking them from the host would have
+manufactured disputes at roughly the rate the kernel called `sin` — V8 and the platform libm
+disagree on the bits of *every* function measured, and on one input the platform is simply wrong
+([ADR-0016](adr/0016-math-belongs-in-the-module-not-the-host.md)). It would have presented as an
+unexplained dispute rate on a computation nobody could check. That is the reason the math library
+came before the science, and
+[ADR-0020](adr/0020-the-first-real-workload-is-a-periodogram-not-docking.md) is where the choice of
+kernel is argued — including why it is not the molecular docking this project named for a year.
+
+Its test is the only one here that checks the answer is **right** rather than only that every
+engine agrees: a signal is synthesised at a known frequency and the peak has to come back at it,
+within the resolution the observing span physically allows. Three engines computing the same wrong
+number would satisfy every other test in that file.
+
+---
+
 ## Checking the claims instead of believing them
 
 ```bash

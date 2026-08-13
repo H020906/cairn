@@ -1,0 +1,32 @@
+# A real workload, not a fixture. See src/lib.rs for what it computes and why this one.
+#
+# `[workspace]` on its own line makes this the root of its own workspace, so cargo does not walk
+# up and adopt the repository's. A workload is a program submitted *to* Cairn, not part of it.
+[workspace]
+
+[package]
+name = "cairn-periodogram"
+description = "Lomb-Scargle periodogram over one frequency band — a Cairn work unit"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cairn-workload = { path = "../rust/cairn-workload" }
+# The whole reason this workload is possible. A periodogram is `sin` and `cos` and almost nothing
+# else, and `f64::sin` on this target comes from whatever libm the host was built with — which is
+# the case ADR-0016 measured and found to disagree on every function, and to be outright wrong on
+# one. A scientific kernel taking its trigonometry from the host would manufacture disputes at
+# roughly the rate it calls `sin`.
+cairn-math = { path = "../rust/cairn-math" }
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = "symbols"

@@ -101,8 +101,13 @@ Be clear-eyed about this, because README and ARCHITECTURE describe a whole syste
   bytes under a deterministic interpreter, so a party whose original answer was wrong for
   non-adversarial reasons replays honestly, agrees, and is convicted of nothing. See
   [ADR-0011](adr/0011-a-volunteer-that-cannot-argue-is-not-challenged.md).
-- **No real workload.** The molecular-docking target is an intention;
-  `workloads/examples/sum-of-squares.wat` is a demonstration fixture, not science.
+- **There is a real workload now**, and it is not the one this file used to name.
+  `workloads/periodogram` is a Lomb–Scargle periodogram — one frequency band per unit, the shape
+  of search Einstein@Home runs. **Molecular docking is still an intention**, and
+  [ADR-0020](adr/0020-the-first-real-workload-is-a-periodogram-not-docking.md) says what it needs
+  first: shared reference data per campaign, and a way to check a score against something other
+  than three engines agreeing about it. `workloads/examples/sum-of-squares.wat` remains what it
+  always was — a demonstration fixture, not science.
 
 And one thing that *does* exist and is the fastest way in:
 

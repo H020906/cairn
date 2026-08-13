@@ -30,6 +30,7 @@ done this way?"*
 | [0017](0017-a-verdict-nobody-can-read-is-not-a-verdict.md) | Give the re-execution route a typed verdict | Accepted, closes an open item in 0015 |
 | [0018](0018-a-compilers-call-indirect-is-not-the-specifications.md) | Admit reference types for their encoding, refuse them as values | Accepted, narrows 0003 |
 | [0019](0019-no-std-is-a-proxy-and-the-import-list-is-the-property.md) | A workload SDK, and `no_std` is the wrong guarantee to reach for | Accepted, builds on 0016 |
+| [0020](0020-the-first-real-workload-is-a-periodogram-not-docking.md) | The first real workload is a periodogram, not molecular docking | Accepted, revises ARCHITECTURE |
 
 ## Reading order
 
@@ -152,6 +153,18 @@ checkable**: read the module's import section and require it to be exactly `cair
 `cairn.output`. Read 0019 also for the thing the SDK is really for — every piece of ceremony it
 removes is a way to be refused by an error message that names something else, and the three link
 flags are measured there one step at a time.
+
+**0020** is the project changing a target it had stated since the scaffold. `ARCHITECTURE.md`
+said the first real workload would be molecular docking; it is a Lomb–Scargle periodogram
+instead. Read it for the two reasons, both of which only became visible once the rest of the
+system existed: **a docking unit is not self-contained** — the receptor is tens of thousands of
+atoms, identical for every unit, and Cairn carries a unit's input *in* the unit — and **a docking
+score cannot be checked against anything but itself**, so the only available test would have been
+"three engines agree", which is exactly what a wrong kernel also passes.
+
+The periodogram fails neither. Its test is the only one in the differential file that asserts the
+answer is *right* as well as *identical*: a signal is synthesised at a known frequency and the
+peak has to come back at it.
 
 ## Format
 

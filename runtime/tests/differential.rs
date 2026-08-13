@@ -1871,18 +1871,20 @@ fn the_shapes_a_compiler_turns_into_indirect_calls_agree_on_every_engine() {
 /// Nesting cargo inside cargo is safe here only because the template declares its own
 /// `[workspace]` and therefore builds into its own `target/`, so it takes a different build lock.
 /// `cairn-math/tests/wasm.rs` avoids nesting for exactly the reason that does not apply here.
-fn build_template() -> Option<Vec<u8>> {
+fn build_with_cargo(directory: &str, artefact: &str) -> Option<Vec<u8>> {
     let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
-    let template = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/template");
+    let package = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../workloads")
+        .join(directory);
 
     let built = std::process::Command::new(cargo)
         .arg("build")
         .arg("--release")
         .arg("--manifest-path")
-        .arg(template.join("Cargo.toml"))
+        .arg(package.join("Cargo.toml"))
         // Cargo passes its own target directory down through the environment, and inheriting it
-        // would put the template's artefacts in the workspace's `target/` — taking the lock this
-        // test is running under, and deadlocking. The template's own directory is the default.
+        // would put these artefacts in the workspace's `target/` — taking the lock this test is
+        // running under, and deadlocking. The package's own directory is the default.
         .env_remove("CARGO_TARGET_DIR")
         .output()
         .ok()?;
@@ -1890,14 +1892,23 @@ fn build_template() -> Option<Vec<u8>> {
         let complaint = String::from_utf8_lossy(&built.stderr);
         assert!(
             complaint.contains("wasm32-unknown-unknown"),
-            "the workload template does not build, which is the one thing it exists to do:\n\
+            "workloads/{directory} does not build, which is the one thing it exists to do:\n\
              {complaint}"
         );
         return None;
     }
 
-    let wasm = template.join("target/wasm32-unknown-unknown/release/cairn_workload_template.wasm");
-    Some(std::fs::read(&wasm).expect("the template built but produced no module"))
+    let wasm = package
+        .join("target/wasm32-unknown-unknown/release")
+        .join(artefact);
+    Some(
+        std::fs::read(&wasm)
+            .unwrap_or_else(|e| panic!("{directory} built but produced no module: {e}")),
+    )
+}
+
+fn build_template() -> Option<Vec<u8>> {
+    build_with_cargo("template", "cairn_workload_template.wasm")
 }
 
 /// Every `(module, name)` the given module imports.
@@ -1999,6 +2010,238 @@ fn the_workload_template_compiles_and_is_admissible() {
         "the template is {} bytes, imports exactly its two host functions, and agreed on \
          {checked} cases across three engines",
         source.len()
+    );
+}
+
+// --- a real scientific kernel ------------------------------------------------------------------
+
+/// A time series with a periodic signal in it, at *uneven* intervals.
+///
+/// Uneven on purpose: even sampling is what a periodogram is not needed for. A telescope observes
+/// when the weather, the daylight and the schedule allow, and Lomb–Scargle exists because the
+/// Fourier transform assumes a regular grid that real observations do not lie on.
+///
+/// The jitter comes from a small multiplicative congruential generator rather than a random number
+/// crate, so the series is a pure function of `seed` and this test asserts things about a signal
+/// it can regenerate exactly. Nothing here needs statistical quality; it needs reproducibility.
+fn synthetic_observations(count: usize, frequency: f64, seed: u64) -> (Vec<f64>, Vec<f64>) {
+    let mut state = seed | 1;
+    let mut next_unit = || {
+        // Lehmer, with a well-known multiplier. The top bits are the good ones.
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1);
+        ((state >> 11) as f64) / ((1u64 << 53) as f64)
+    };
+
+    let mut times = Vec::with_capacity(count);
+    let mut values = Vec::with_capacity(count);
+    let mut clock = 0.0f64;
+    for _ in 0..count {
+        // A gap of between 0.2 and 1.2 days, so the series is irregular but never goes backwards.
+        clock += 0.2 + next_unit();
+        let phase = std::f64::consts::TAU * frequency * clock + 0.7;
+        // Signal plus a little noise, so the peak is real rather than an artefact of a noiseless
+        // sinusoid landing exactly on a sampled frequency.
+        let noise = (next_unit() - 0.5) * 0.20;
+        times.push(clock);
+        values.push(12.0 + 0.5 * phase.sin() + noise);
+    }
+    (times, values)
+}
+
+/// Pack a unit for the periodogram workload. The layout is in its own crate documentation.
+fn periodogram_input(times: &[f64], values: &[f64], band: (f64, f64), frequencies: u32) -> Vec<u8> {
+    let mut unit = Vec::with_capacity(24 + times.len() * 16);
+    unit.extend_from_slice(&band.0.to_le_bytes());
+    unit.extend_from_slice(&band.1.to_le_bytes());
+    unit.extend_from_slice(&frequencies.to_le_bytes());
+    unit.extend_from_slice(&(times.len() as u32).to_le_bytes());
+    for (time, value) in times.iter().zip(values) {
+        unit.extend_from_slice(&time.to_le_bytes());
+        unit.extend_from_slice(&value.to_le_bytes());
+    }
+    unit
+}
+
+/// The three `f64`s a periodogram unit answers with.
+fn periodogram_output(bytes: &[u8]) -> (f64, f64, f64) {
+    assert_eq!(
+        bytes.len(),
+        24,
+        "a periodogram unit answers with three f64s"
+    );
+    let read = |at: usize| {
+        let mut word = [0u8; 8];
+        word.copy_from_slice(&bytes[at..at + 8]);
+        f64::from_le_bytes(word)
+    };
+    (read(0), read(8), read(16))
+}
+
+/// A real scientific kernel: recover a known period, and agree about it on every engine.
+///
+/// # Why this test is different from every other one in this file
+///
+/// Everything else here checks that engines **agree**. Agreement is necessary and it is not
+/// sufficient: three engines computing the same wrong number agree perfectly. This one also checks
+/// that the answer is **right**, against something outside the computation — a signal synthesised
+/// at a known frequency, which the periodogram has to find.
+///
+/// That is what made the roadmap put a real workload after the math library rather than before it.
+/// A genuine numerical kernel is exactly where a float divergence hides, so a workload built on
+/// host trigonometry would have produced a mystery: a dispute rate nobody could explain, on a
+/// computation nobody could check. With [ADR-0016](../../docs/adr/0016-math-belongs-in-the-module-not-the-host.md)
+/// the trigonometry is in the module, and both halves can be asserted at once.
+#[test]
+fn a_periodogram_recovers_a_known_period_and_every_engine_agrees() {
+    let Some(source) = build_with_cargo("periodogram", "cairn_periodogram.wasm") else {
+        assert!(
+            !std::env::var("CAIRN_REQUIRE_WASM").is_ok_and(|required| required == "1"),
+            "CAIRN_REQUIRE_WASM=1 but wasm32-unknown-unknown is not installed"
+        );
+        println!(
+            "SKIPPED: wasm32-unknown-unknown is not installed, so the scientific kernel was NOT \
+             run. Install it with `rustup target add wasm32-unknown-unknown`, or set \
+             CAIRN_REQUIRE_WASM=1 to make this a failure."
+        );
+        return;
+    };
+
+    validate::validate_submitted(&source, validate::Limits::default())
+        .unwrap_or_else(|refusal| panic!("the periodogram workload is not admissible: {refusal}"));
+
+    // 0.137 cycles per day — about a 7.3-day period, and deliberately not a round number or a
+    // multiple of the sampling, so a peak there cannot be an artefact of either.
+    const TRUE_FREQUENCY: f64 = 0.137;
+    const BAND: (f64, f64) = (0.05, 0.30);
+
+    // **Sized for a test, not for production.** Every (observation, frequency) pair costs four
+    // transcendental calls, and this runs under Cairn's interpreter on the dispute path — the
+    // slowest configuration there is. 120 × 400 is a few hundred thousand calls and a couple of
+    // seconds; a real unit would be tens of times larger and would still be a fraction of a second
+    // on the compiled engine a volunteer actually uses.
+    const OBSERVATIONS: usize = 120;
+    const FREQUENCIES: u32 = 400;
+
+    let (times, values) = synthetic_observations(OBSERVATIONS, TRUE_FREQUENCY, 0x5eed_1234);
+    let span = times.last().expect("observations") - times.first().expect("observations");
+    let unit = periodogram_input(&times, &values, BAND, FREQUENCIES);
+
+    // The two committed input files, which are the same observations over two different bands —
+    // which is how a real search is split among volunteers. They exist so the workload's README
+    // commands run and so a coordinator demonstration has genuine units to hand out.
+    //
+    // **Checked rather than merely shipped.** A committed binary nobody can regenerate is exactly
+    // what `cairn-math/tests/wasm.rs` refuses to have, so these are regenerated here and compared:
+    // if the generator above changes, this fails and says how to refresh them. One source of
+    // truth, and it is the code that also asserts the science.
+    let workload =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../workloads/periodogram");
+    let regenerate = std::env::var("CAIRN_REGENERATE_INPUTS").is_ok_and(|value| value == "1");
+    for (name, band) in [
+        ("band-with-the-signal.bin", BAND),
+        ("band-without-it.bin", (0.30, 0.55)),
+    ] {
+        let expected = periodogram_input(&times, &values, band, FREQUENCIES);
+        let path = workload.join(name);
+        if regenerate {
+            std::fs::write(&path, &expected)
+                .unwrap_or_else(|e| panic!("could not write {name}: {e}"));
+            println!("regenerated {name} ({} bytes)", expected.len());
+            continue;
+        }
+        let committed = std::fs::read(&path).unwrap_or_else(|e| {
+            panic!(
+                "{name} is missing: {e}. Regenerate the committed inputs \
+                with CAIRN_REGENERATE_INPUTS=1"
+            )
+        });
+        assert_eq!(
+            committed, expected,
+            "{name} no longer matches what this test generates. If that was intended, refresh it \
+             with CAIRN_REGENERATE_INPUTS=1"
+        );
+    }
+    if regenerate {
+        // Said loudly, because this test passing while having checked nothing is the shape of
+        // thing that goes unnoticed for months. A silently skipped test is worse than a failing
+        // one, which is the same reason `CAIRN_REQUIRE_WASM` exists.
+        println!(
+            "CAIRN_REGENERATE_INPUTS=1: the committed units were rewritten and NOTHING ELSE WAS \
+             CHECKED. Run this test again without it to verify the science."
+        );
+        return;
+    }
+
+    let module = canonical_bytes(&source, Config::default());
+    let mine = run_cairn(&module, &unit);
+    assert!(
+        !mine.hit_a_cairn_limit,
+        "the periodogram unit exceeded an interpreter limit"
+    );
+    let answer = mine
+        .output
+        .clone()
+        .expect("the periodogram trapped, which it has no business doing");
+
+    // Half of the test: every engine agrees, bit for bit, on both the answer and the work done.
+    let interpreted = run_wasmi(&module, &unit);
+    assert_eq!(mine.fuel, interpreted.fuel, "fuel differs against wasmi");
+    assert_eq!(
+        mine.output, interpreted.output,
+        "output differs against wasmi"
+    );
+    let compiled = run_wasmtime(&module, &unit);
+    assert_eq!(mine.fuel, compiled.fuel, "fuel differs against wasmtime");
+    assert_eq!(
+        mine.output, compiled.output,
+        "output differs against wasmtime"
+    );
+
+    // The other half, and the one agreement cannot give: the science is right.
+    let (peak, power, total) = periodogram_output(&answer);
+
+    // **The Rayleigh resolution is the honest bound.** A periodogram cannot separate frequencies
+    // closer together than `1/T`, where `T` is the observing span, however finely the band is
+    // sampled — so that, and not the bin width, is what the recovered peak has to fall inside.
+    // Asserting anything tighter would be asserting a property of this particular noise draw.
+    let resolution = 1.0 / span;
+    let error = (peak - TRUE_FREQUENCY).abs();
+    assert!(
+        error < resolution,
+        "the peak came back at {peak:.6} c/d against a true {TRUE_FREQUENCY} c/d — off by \
+         {error:.6}, which is more than the {resolution:.6} c/d this series can resolve"
+    );
+
+    // And the peak has to be a *detection* rather than the largest value in a flat band.
+    //
+    // **Thresholded on the power itself, not on its ratio to the band mean.** The first version of
+    // this test asserted `power > 20 × mean` and failed at 19.8, which is the sort of number that
+    // gets quietly relaxed until it passes. The ratio was the wrong statistic: this workload
+    // normalises by the variance, so under pure noise the power at each independent frequency is
+    // exponentially distributed with mean 1 — and the band mean here is not 1 but ~3, because the
+    // peak is about nineteen bins wide (the Rayleigh width divided by the frequency step) and its
+    // own shoulders are most of what raises it. Dividing by a mean the signal inflates measures
+    // the signal against itself.
+    //
+    // A power of 20 has a false-alarm probability of e⁻²⁰ ≈ 2×10⁻⁹ per independent frequency, so
+    // across this band it is around 10⁻⁶. That is a threshold with a meaning rather than a
+    // threshold that happens to pass.
+    let mean_power = total / f64::from(FREQUENCIES);
+    assert!(
+        power > 20.0,
+        "peak power {power:.2} is below the detection threshold, so nothing was found and the \
+         frequency above is meaningless (band mean {mean_power:.2})"
+    );
+
+    println!(
+        "recovered {peak:.6} c/d against a true {TRUE_FREQUENCY} c/d \
+         ({error:.6} off, resolution {resolution:.6}), power {power:.1} against a band mean of \
+         {mean_power:.2}, over {} observations spanning {span:.1} days — identical bytes and \
+         {} fuel on three engines",
+        times.len(),
+        mine.fuel,
     );
 }
 
@@ -2167,6 +2410,35 @@ fn browser_corpus() -> Vec<BrowserCase> {
                     expected,
                 });
             }
+        }
+    }
+
+    // And the real scientific kernel, which is where the math library is used the way a workload
+    // actually uses it: thousands of `sin` and `cos` calls accumulated into running sums, rather
+    // than one call per argument compared in isolation. **If a divergence survives everything
+    // above, this is the shape it survives in** — and V8 is the engine that would be running it.
+    //
+    // Deliberately a small unit. Forty observations over sixty frequencies is under ten thousand
+    // transcendental calls, which is nothing for any engine here, and the property under test is
+    // agreement rather than throughput.
+    if let Some(source) = build_with_cargo("periodogram", "cairn_periodogram.wasm") {
+        let (times, values) = synthetic_observations(40, 0.137, 0x5eed_1234);
+        let input = periodogram_input(&times, &values, (0.05, 0.30), 60);
+        for (which, config) in [
+            ("dispute", Config::default()),
+            ("honest", HONEST_CONFIGS[0]),
+        ] {
+            let module = canonical_bytes(&source, config);
+            let expected = run_cairn(&module, &input);
+            if expected.hit_a_cairn_limit {
+                continue;
+            }
+            corpus.push(BrowserCase {
+                name: format!("periodogram ({which})"),
+                module,
+                input: input.clone(),
+                expected,
+            });
         }
     }
 
